@@ -132,9 +132,18 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
         break;
     case CMD_SET_ADVERT_NAME:
         if (f.size() > 1) {
-            std::lock_guard<std::mutex> lk(mtx_);
-            cfg_.name.assign((const char*)f.data() + 1, f.size() - 1);
-            fprintf(stderr, "[node] name set to '%s'\n", cfg_.name.c_str());
+            // The official app NUL-terminates the name in the frame
+            // (meshcore-open does not). A kept NUL ends up inside the
+            // "name: text" plaintext on air, and every receiver truncates
+            // the message at it - showing an empty message.
+            std::string name((const char*)f.data() + 1, f.size() - 1);
+            auto nul = name.find('\0');
+            if (nul != std::string::npos) name.resize(nul);
+            if (!name.empty()) {
+                std::lock_guard<std::mutex> lk(mtx_);
+                cfg_.name = name;
+                fprintf(stderr, "[node] name set to '%s'\n", cfg_.name.c_str());
+            }
         }
         send({RESP_OK});
         break;

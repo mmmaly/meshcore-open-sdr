@@ -169,6 +169,12 @@ if len(r) == 148:
 r = recv_resp()
 check(r[0] == 4, "END_OF_CONTACTS")
 
+# 5b. Rename with a trailing NUL, as the official app sends it; the NUL must
+# not survive into the name (it would truncate every on-air message)
+c.send(bytes([8]) + b"NulName\x00")
+r = recv_resp()
+check(r[0] == 0, "SET_ADVERT_NAME (NUL-terminated) -> OK")
+
 # 6. Send a channel message -> RESP_SENT + fake lora_tx invoked with valid packet
 c.send(bytes([3, 0, 0]) + struct.pack("<I", int(time.time())) + b"ahoj z testu\x00")
 r = recv_resp()
@@ -184,7 +190,7 @@ if sent_hex and DECODER_CLI:
     out = subprocess.run([DECODER_CLI, sent_hex, "-k", PUB_KEY],
                          capture_output=True, text=True).stdout
     check("ahoj z testu" in out, "transmitted packet decrypts to the sent text")
-    check("SDR Test Node" in out, "on-air message carries the node name prefix")
+    check("NulName" in out, "on-air message carries the (renamed) node name prefix")
 
 # 7. Unknown command -> RESP_ERR, daemon stays alive
 c.send(bytes([99]))
