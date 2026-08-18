@@ -85,6 +85,10 @@ struct QueuedMessage {
 
 class Node {
 public:
+    // Mirrors firmware MAX_GROUP_CHANNELS: DEVICE_INFO advertises it and
+    // GET/SET_CHANNEL error past it (the official app scans until that error)
+    static constexpr uint8_t MAX_CHANNELS = 8;
+
     // sendToApp delivers one protocol frame to the connected app (no-op when
     // disconnected); it must be safe to call from the radio thread.
     using AppSender = std::function<void(const std::vector<uint8_t>&)>;

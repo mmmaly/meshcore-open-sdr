@@ -65,7 +65,8 @@ std::vector<uint8_t> Node::buildDeviceInfo() {
     f[0] = RESP_DEVICE_INFO;
     f[1] = 7;                       // firmware ver code: pre-stats featureset
     f[2] = 100;                     // -> 200 max contacts
-    f[3] = 8;                       // max channels: keep the sync loop short
+    f[3] = MAX_CHANNELS;
+    strncpy((char*)f.data() + 8, __DATE__, 11);
     const char* manu = "MeshCore SDR (RTL-SDR rx, HackRF tx)";
     strncpy((char*)f.data() + 20, manu, 39);
     strncpy((char*)f.data() + 60, "sdr-node 0.1", 19);
@@ -127,13 +128,15 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
     case CMD_SET_AUTO_ADD_CONFIG:
     case CMD_SET_DEVICE_TIME:      // host clock is NTP-disciplined; ignore
     case CMD_SET_OTHER_PARAMS:
-        break;                     // fire-and-forget in the connector
+        send({RESP_OK});           // firmware OKs every setter
+        break;
     case CMD_SET_ADVERT_NAME:
         if (f.size() > 1) {
             std::lock_guard<std::mutex> lk(mtx_);
             cfg_.name.assign((const char*)f.data() + 1, f.size() - 1);
             fprintf(stderr, "[node] name set to '%s'\n", cfg_.name.c_str());
         }
+        send({RESP_OK});
         break;
     case CMD_SET_ADVERT_LATLON:
         if (f.size() >= 9) {
@@ -141,6 +144,7 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
             cfg_.lat = (int32_t)getU32(f.data() + 1) / 1e6;
             cfg_.lon = (int32_t)getU32(f.data() + 5) / 1e6;
         }
+        send({RESP_OK});
         break;
     case CMD_SET_RADIO_PARAMS:
         if (f.size() >= 11) {
@@ -156,14 +160,23 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
                     "(applied to TX; restart daemon to retune RX)\n",
                     rc.tx_freq, rc.bw, rc.tx_sf, rc.tx_cr);
         }
+        send({RESP_OK});
         break;
     case CMD_SET_RADIO_TX_POWER:
-        break;                     // HackRF gain is configured host-side
+        send({RESP_OK});           // HackRF gain is configured host-side
+        break;
     case CMD_SET_FLOOD_SCOPE:
         send({RESP_OK});           // scoping not implemented; ack so sends proceed
         break;
     case CMD_GET_CHANNEL: {
         uint8_t idx = f.size() > 1 ? f[1] : 0;
+        if (idx >= MAX_CHANNELS) {
+            // Real firmware errors past MAX_GROUP_CHANNELS; the official
+            // app scans until it sees this, so answering every index with
+            // a valid empty slot makes its channel count run away
+            send({RESP_ERR, 2 /*not found*/});
+            break;
+        }
         std::vector<uint8_t> r(50, 0);
         r[0] = RESP_CHANNEL_INFO;
         r[1] = idx;
@@ -177,7 +190,7 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
         break;
     }
     case CMD_SET_CHANNEL:
-        if (f.size() >= 50) {
+        if (f.size() >= 50 && f[1] < MAX_CHANNELS) {
             uint8_t idx = f[1];
             char name[33] = {0};
             memcpy(name, f.data() + 2, 32);
@@ -189,8 +202,12 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
                 channels_[idx].keyHex.clear();   // deleted slot
             saveChannels(cfg_.channels_file, channels_);
             fprintf(stderr, "[node] channel %u set: '%s'\n", idx, name);
+            send({RESP_OK});
+        } else {
+            send({RESP_ERR, (uint8_t)(f.size() >= 2 && f[1] >= MAX_CHANNELS
+                                      ? 2 /*not found*/ : 6 /*illegal arg*/)});
         }
-        break;                     // connector does not await a reply
+        break;
     case CMD_SYNC_NEXT_MESSAGE: {
         std::lock_guard<std::mutex> lk(mtx_);
         if (inbox_.empty()) {
@@ -221,6 +238,7 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
         break;
     case CMD_SEND_SELF_ADVERT:
         sendSelfAdvert(f.size() > 1 && f[1] != 0);
+        send({RESP_OK});
         break;
     case CMD_SEND_CHANNEL_TXT_MSG:
         handleSendChannelText(f, send);

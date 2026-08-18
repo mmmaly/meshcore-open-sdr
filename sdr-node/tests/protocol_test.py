@@ -136,6 +136,14 @@ for i in range(1, max_channels):
     r = recv_resp()
     check(r[0] == 18 and len(r) >= 50, f"CHANNEL_INFO idx {i} (empty slot)") if i == 1 else None
 
+# 3b. Past the end: firmware parity requires ERR not-found, or the official
+# app's scan-until-error channel loop never terminates
+c.send(bytes([31, max_channels])); r = recv_resp()
+check(r[0] == 1 and len(r) >= 2 and r[1] == 2, "CHANNEL_INFO past max -> ERR not_found")
+# 3c. Setters answer RESP_OK like real firmware
+c.send(bytes([6]) + struct.pack("<I", int(time.time()))); r = recv_resp()
+check(r[0] == 0, "SET_DEVICE_TIME -> OK")
+
 # 4. Message sync: fake rx feed delivers a GroupText ~2 s after daemon start
 time.sleep(2.5)
 c.send(bytes([10]))
