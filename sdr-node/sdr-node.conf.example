@@ -27,6 +27,9 @@ tx_freq = 869618000
 tx_sf = 7
 tx_cr = 1
 tx_ppm = 0
-tx_vga = 30
+tx_vga = 47
+# HackRF PA, +11 dB. For transmitting this is the main power lever (the
+# overload warnings elsewhere concern the amp on the RECEIVE side)
+tx_amp = 1
 # EU 869.4-869.65 MHz sub-band allows 10% duty cycle
 tx_duty = 10

@@ -39,6 +39,7 @@ struct NodeConfig {
     int tx_cr = 1;
     int tx_ppm = 0;
     int tx_vga = 30;
+    bool tx_amp = false;
     double tx_duty = 10.0;
 
     static NodeConfig load(const std::string& path, std::string& err);

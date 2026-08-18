@@ -41,6 +41,8 @@ struct RadioConfig {
     int tx_cr = 1;
     int tx_ppm = 0;
     int tx_vga = 30;
+    bool tx_amp = false;                // HackRF PA (+11 dB); fine for TX,
+                                        // it is the RX side the amp overloads
     double tx_duty = 10.0;              // EU 869.4-869.65 sub-band allows 10%
 };
 

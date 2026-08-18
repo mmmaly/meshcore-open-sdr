@@ -49,6 +49,7 @@ NodeConfig NodeConfig::load(const std::string& path, std::string& err) {
         else if (k == "tx_cr") c.tx_cr = atoi(v.c_str());
         else if (k == "tx_ppm") c.tx_ppm = atoi(v.c_str());
         else if (k == "tx_vga") c.tx_vga = atoi(v.c_str());
+        else if (k == "tx_amp") c.tx_amp = atoi(v.c_str()) != 0;
         else if (k == "tx_duty") c.tx_duty = atof(v.c_str());
         else fprintf(stderr, "[config] unknown key '%s'\n", k.c_str());
     }

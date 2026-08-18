@@ -54,6 +54,7 @@ int main(int argc, char* argv[]) {
     rc.tx_cr = cfg.tx_cr;
     rc.tx_ppm = cfg.tx_ppm;
     rc.tx_vga = cfg.tx_vga;
+    rc.tx_amp = cfg.tx_amp;
     rc.tx_duty = cfg.tx_duty;
 
     SdrRadio radio(rc);

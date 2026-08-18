@@ -121,6 +121,7 @@ bool SdrRadio::transmit(const std::string& hex) {
         "-y", std::to_string(cfg_.tx_duty),
         "-x", hex,
     };
+    if (cfg_.tx_amp) argv.insert(argv.end() - 2, "-a");
     pid_t pid = fork();
     if (pid < 0) return false;
     if (pid == 0) {
