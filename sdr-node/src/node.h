@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <map>
@@ -106,8 +107,14 @@ public:
     void setAppSender(AppSender sender);
 
     void sendSelfAdvert(bool flood);
+    ~Node();
 
 private:
+    // Transmissions run on their own thread: the app expects RESP_SENT
+    // immediately (firmware queues and replies), and blocking the server
+    // thread for the HackRF's open+airtime made the send button hang.
+    void enqueueTx(std::string hex);
+    void txWorker();
     std::vector<uint8_t> buildSelfInfo();
     std::vector<uint8_t> buildDeviceInfo();
     std::vector<uint8_t> buildContactFrame(const Contact& c, uint8_t code);
@@ -126,4 +133,9 @@ private:
     std::map<std::string, double> seen_;            // payload hash -> time
     AppSender appSender_;
     float lastSnr_ = 0.0f;
+
+    std::thread txThread_;
+    std::condition_variable txCv_;
+    std::deque<std::string> txQueue_;
+    bool txStop_ = false;
 };

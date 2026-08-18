@@ -30,6 +30,38 @@ Node::Node(const NodeConfig& cfg, const NodeIdentity& id, SdrRadio& radio)
     channels_ = loadChannels(cfg_.channels_file);
     fprintf(stderr, "[node] %s, pubkey %.16s..., %zu channel(s)\n",
             cfg_.name.c_str(), id_.publicKeyHex.c_str(), channels_.size());
+    txThread_ = std::thread(&Node::txWorker, this);
+}
+
+Node::~Node() {
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        txStop_ = true;
+    }
+    txCv_.notify_all();
+    if (txThread_.joinable()) txThread_.join();
+}
+
+void Node::enqueueTx(std::string hex) {
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        txQueue_.push_back(std::move(hex));
+    }
+    txCv_.notify_one();
+}
+
+void Node::txWorker() {
+    std::unique_lock<std::mutex> lk(mtx_);
+    while (true) {
+        txCv_.wait(lk, [this] { return txStop_ || !txQueue_.empty(); });
+        if (txStop_) return;
+        std::string hex = std::move(txQueue_.front());
+        txQueue_.pop_front();
+        lk.unlock();
+        if (!radio_.transmit(hex))
+            fprintf(stderr, "[node] tx failed for a queued packet\n");
+        lk.lock();
+    }
 }
 
 void Node::setAppSender(AppSender sender) {
@@ -297,15 +329,15 @@ void Node::handleSendChannelText(const std::vector<uint8_t>& f, const AppSender&
         seen_[toLower(bytesToHex(payload.bytes))] = (double)now;
     }
 
-    bool ok = radio_.transmit(hex);
-    if (!ok) { send({RESP_ERR, 3}); return; }
+    enqueueTx(hex);
 
-    // SENT: [6][is_flood][ack_hash4 = 0: channel floods carry no ack][est_ms4]
+    // SENT immediately, like firmware: the packet is queued for the radio.
+    // [6][is_flood][ack_hash4 = 0: channel floods carry no ack][est_ms4]
     std::vector<uint8_t> r{RESP_SENT, 1};
     putU32(r, 0);
-    putU32(r, 3000);
+    putU32(r, 5000);
     send(r);
-    fprintf(stderr, "[node] channel %u tx: %zu chars\n", idx, text.size());
+    fprintf(stderr, "[node] channel %u tx queued: %zu chars\n", idx, text.size());
 }
 
 void Node::sendSelfAdvert(bool flood) {
@@ -331,8 +363,8 @@ void Node::sendSelfAdvert(bool flood) {
         std::lock_guard<std::mutex> lk(mtx_);
         seen_[toLower(bytesToHex(payload.bytes))] = (double)time(nullptr);
     }
-    radio_.transmit(toLower(bytesToHex(pkt.bytes)));
-    fprintf(stderr, "[node] self advert sent (%s)\n", flood ? "flood" : "zero-hop");
+    enqueueTx(toLower(bytesToHex(pkt.bytes)));
+    fprintf(stderr, "[node] self advert queued (%s)\n", flood ? "flood" : "zero-hop");
 }
 
 bool Node::seenBefore(const std::string& payloadHex, double now) {
