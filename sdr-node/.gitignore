@@ -1,0 +1,4 @@
+build/
+sdr-node.conf
+identity.key
+channels.txt

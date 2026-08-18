@@ -1,0 +1,32 @@
+# meshcore-sdr-node configuration
+# Copy to sdr-node.conf and adjust. Do not commit real channel keys.
+
+name = SDR Node
+port = 5000
+# lat = 48.1486
+# lon = 17.1077
+
+# Files created/managed by the daemon (identity on first run)
+identity_file = identity.key
+channels_file = channels.txt
+
+# --- Receive: RTL-SDR via lora_rx ---
+rx_binary = /home/mmm/LoraReceiverStandalone/lora_rx
+# Listen to both meshes at once; the daemon answers on the TX channel below
+rx_channels = 869432000,869618000
+rx_sfs = 7,8
+bw = 62500
+# Per-dongle: RTL-SDR Blog V4 needs -3, the generic RTL2838UHIDIR needs 70
+rx_ppm = 70
+# Which dongle (USB-string substring or index); empty = device 0
+rx_device = UHIDIR
+
+# --- Transmit: HackRF via lora_tx ---
+tx_binary = /home/mmm/LoraReceiverStandalone/lora_tx
+tx_freq = 869618000
+tx_sf = 7
+tx_cr = 1
+tx_ppm = 0
+tx_vga = 30
+# EU 869.4-869.65 MHz sub-band allows 10% duty cycle
+tx_duty = 10
