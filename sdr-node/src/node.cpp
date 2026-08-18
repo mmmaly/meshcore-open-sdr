@@ -341,7 +341,12 @@ void Node::onRxPacket(const RxPacket& pkt) {
     std::string payloadHex = toLower(decoded.payloadRaw);
     {
         std::lock_guard<std::mutex> lk(mtx_);
-        if (seenBefore(payloadHex, pkt.time)) return;
+        if (seenBefore(payloadHex, pkt.time)) {
+            // Own transmissions coming back through the RTL-SDR land here
+            // too - useful as on-air confirmation in the log
+            fprintf(stderr, "[node] heard duplicate/own payload (snr %.1f)\n", pkt.snr);
+            return;
+        }
     }
 
     if (decoded.payloadType == PayloadType::GroupText) {
