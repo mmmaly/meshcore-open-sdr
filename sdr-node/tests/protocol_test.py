@@ -178,7 +178,7 @@ check(r[0] == 0, "SET_ADVERT_NAME (NUL-terminated) -> OK")
 # 6. Send a channel message -> RESP_SENT + fake lora_tx invoked with valid packet
 c.send(bytes([3, 0, 0]) + struct.pack("<I", int(time.time())) + b"ahoj z testu\x00")
 r = recv_resp()
-check(r[0] == 6 and len(r) >= 10, "RESP_SENT for channel send")
+check(r[0] == 0, "channel send answered with RESP_OK (firmware parity)")
 time.sleep(0.5)
 sent_hex = None
 with open(tx_record) as f:

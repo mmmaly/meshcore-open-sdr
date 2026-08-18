@@ -331,12 +331,11 @@ void Node::handleSendChannelText(const std::vector<uint8_t>& f, const AppSender&
 
     enqueueTx(hex);
 
-    // SENT immediately, like firmware: the packet is queued for the radio.
-    // [6][is_flood][ack_hash4 = 0: channel floods carry no ack][est_ms4]
-    std::vector<uint8_t> r{RESP_SENT, 1};
-    putU32(r, 0);
-    putU32(r, 5000);
-    send(r);
+    // Firmware answers a channel send with a bare RESP_CODE_OK (RESP_SENT is
+    // only for direct messages, which carry an ack hash). The official app's
+    // send button waits for exactly this OK; meshcore-open marks the message
+    // sent from its generic-ack path on the same byte.
+    send({RESP_OK});
     fprintf(stderr, "[node] channel %u tx queued: %zu chars\n", idx, text.size());
 }
 
