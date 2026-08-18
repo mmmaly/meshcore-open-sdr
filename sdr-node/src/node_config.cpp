@@ -117,6 +117,15 @@ std::vector<ChannelDef> loadChannels(const std::string& path) {
         ChannelDef ch;
         ch.name = trim(line.substr(0, comma));
         ch.keyHex = trim(line.substr(comma + 1));
+        // A channel secret is 16 bytes. Longer hex here is usually a pasted
+        // node identity key - refusing it now beats a cryptic send error later.
+        if (!ch.name.empty() &&
+            (ch.keyHex.size() != 32 ||
+             ch.keyHex.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)) {
+            fprintf(stderr, "[config] channel '%s': key is not 32 hex chars, skipping\n",
+                    ch.name.c_str());
+            continue;
+        }
         out.push_back(ch);
     }
     return out;
