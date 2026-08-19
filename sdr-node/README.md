@@ -38,9 +38,13 @@ a PATH return.
 Trace paths work: the app's path-trace map can probe a route and get the
 per-hop SNRs back.
 
-**Not yet:** GRP_DATA blobs (image transfer), acting as a repeater
-(deliberately - at ~25 mW it would be a weak one, and it would double the
-node's airtime).
+Node discovery works (zero-hop CONTROL packets, so only direct neighbours
+answer), and GRP_DATA blobs - the transport the app uses for images - are
+carried both ways. DEVICE_INFO reports feature level 13, matching firmware
+v1.17.1, because everything that level gates is implemented.
+
+**Not yet:** acting as a repeater (deliberately - at ~25 mW it would be a
+weak one, and it would double the node's airtime).
 
 ## Build
 
