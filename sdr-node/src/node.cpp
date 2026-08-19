@@ -214,7 +214,11 @@ std::vector<uint8_t> Node::buildSelfInfo() {
                       // auto-adds contacts from adverts (which this one does).
                       // Sending 1 put the official app in manual mode and it
                       // silently ignored every NEW_ADVERT push.
-    putU32(f, cfg_.tx_freq);
+    // Firmware sends _prefs.freq (MHz) * 1000, so this field is kHz - while
+    // the very next one is bw (kHz) * 1000, i.e. Hz. The app agrees with
+    // firmware: its `freqHz` variable actually carries kHz. Sending Hz here
+    // reported a frequency 1000x too large.
+    putU32(f, cfg_.tx_freq / 1000);
     putU32(f, cfg_.bw);
     f.push_back((uint8_t)cfg_.tx_sf);
     f.push_back((uint8_t)cfg_.tx_cr);
@@ -333,8 +337,8 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
         if (f.size() >= 11) {
             std::lock_guard<std::mutex> lk(mtx_);
             RadioConfig& rc = radio_.config();
-            rc.tx_freq = getU32(f.data() + 1);
-            rc.bw = getU32(f.data() + 5);
+            rc.tx_freq = getU32(f.data() + 1) * 1000;   // frame carries kHz
+            rc.bw = getU32(f.data() + 5);               // frame carries Hz
             rc.tx_sf = f[9];
             rc.tx_cr = f[10] >= 5 ? f[10] - 4 : f[10];
             cfg_.tx_freq = rc.tx_freq; cfg_.bw = rc.bw;

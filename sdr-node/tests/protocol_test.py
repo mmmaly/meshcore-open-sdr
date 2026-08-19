@@ -143,7 +143,8 @@ check(r[0] == 5 and len(r) >= 58, "SELF_INFO (code 5, >=58 bytes)")
 pubkey = r[4:36]
 check(sum(1 for b in pubkey if b == 0) <= 16, "self pubkey looks real")
 freq, bw = struct.unpack_from("<II", r, 48)
-check(freq == 869618000 and bw == 62500, f"radio params in SELF_INFO ({freq}, {bw})")
+# firmware sends freq in kHz (prefs MHz * 1000) but bw in Hz (prefs kHz * 1000)
+check(freq == 869618 and bw == 62500, f"radio params in SELF_INFO ({freq} kHz, {bw} Hz)")
 name = r[58:].split(b"\x00")[0].decode()
 check(name == "SDR Test Node", f"node name '{name}'")
 
@@ -690,6 +691,17 @@ if got_telem:
     self_pub = bytes.fromhex(node_pub) if node_pub else None
     if self_pub:
         check(got_telem[2:8] == self_pub[:6], "self telemetry carries our own prefix")
+
+# 6k2. SET_RADIO_PARAMS carries kHz for frequency; a round-trip must survive it
+c.send(bytes([11]) + struct.pack("<I", 869500) + struct.pack("<I", 62500) + bytes([7, 5]))
+r = recv_resp()
+check(r[0] == 0, "SET_RADIO_PARAMS -> OK")
+c.send(bytes([1, 1, 0, 0, 0, 0, 0, 0]) + b"MeshCoreOpen\x00")
+r = recv_resp()
+f2, b2 = struct.unpack_from("<II", r, 48)
+check(f2 == 869500 and b2 == 62500, f"retune round-trips in kHz (got {f2}, {b2})")
+c.send(bytes([11]) + struct.pack("<I", 869618) + struct.pack("<I", 62500) + bytes([7, 5]))
+recv_resp()
 
 # 6l. Path hash mode: settable, rejected past 2, and reflected in DEVICE_INFO
 c.send(bytes([61, 0, 0])); r = recv_resp()
