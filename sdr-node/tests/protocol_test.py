@@ -691,6 +691,43 @@ if got_telem:
     if self_pub:
         check(got_telem[2:8] == self_pub[:6], "self telemetry carries our own prefix")
 
+# 6l. Path hash mode: settable, rejected past 2, and reflected in DEVICE_INFO
+c.send(bytes([61, 0, 0])); r = recv_resp()
+check(r[0] == 0, "SET_PATH_HASH_MODE 0 -> OK")
+c.send(bytes([22, 4])); r = recv_resp()
+check(r[0] == 13 and r[81] == 0, f"DEVICE_INFO reports the new mode (got {r[81]})")
+c.send(bytes([61, 0, 3])); r = recv_resp()
+check(r[0] == 1 and r[1] == 6, "SET_PATH_HASH_MODE 3 -> ERR illegal arg")
+c.send(bytes([61, 0, 1])); r = recv_resp()
+check(r[0] == 0, "SET_PATH_HASH_MODE back to 1 -> OK")
+c.send(bytes([22, 4])); r = recv_resp()
+check(r[81] == 1, "DEVICE_INFO reflects mode 1 again")
+
+# 6m. Default flood scope: empty, set, read back, clear
+c.send(bytes([64])); r = recv_resp()
+check(r[0] == 28 and len(r) == 1, "GET_DEFAULT_FLOOD_SCOPE with none set -> bare frame")
+scope_name = b"Slovakia"
+scope_key = bytes(range(16))
+c.send(bytes([63]) + scope_name.ljust(31, b"\x00") + scope_key)
+r = recv_resp()
+check(r[0] == 0, "SET_DEFAULT_FLOOD_SCOPE -> OK")
+c.send(bytes([64])); r = recv_resp()
+check(r[0] == 28 and len(r) == 48, "GET_DEFAULT_FLOOD_SCOPE returns 48 bytes")
+if len(r) == 48:
+    check(r[1:32].split(b"\x00")[0] == scope_name, "scope name round-trips")
+    check(r[32:48] == scope_key, "scope key round-trips")
+c.send(bytes([63])); r = recv_resp()
+check(r[0] == 0, "SET_DEFAULT_FLOOD_SCOPE (short) clears -> OK")
+c.send(bytes([64])); r = recv_resp()
+check(len(r) == 1, "scope is cleared again")
+
+# 6n. Device time
+c.send(bytes([5])); r = recv_resp()
+check(r[0] == 9 and len(r) >= 5, "GET_DEVICE_TIME -> RESP_CURR_TIME")
+if len(r) >= 5:
+    check(abs(struct.unpack_from("<I", r, 1)[0] - int(time.time())) < 120,
+          "device time is the real clock")
+
 # 7. Unknown command -> RESP_ERR, daemon stays alive
 c.send(bytes([99]))
 r = recv_resp()

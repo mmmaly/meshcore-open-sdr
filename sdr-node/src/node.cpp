@@ -32,6 +32,7 @@ Node::Node(const NodeConfig& cfg, const NodeIdentity& id, SdrRadio& radio)
     : cfg_(cfg), id_(id), radio_(radio) {
     channels_ = loadChannels(cfg_.channels_file);
     loadContactsFile();
+    loadPrefs();
     fprintf(stderr, "[node] %s, pubkey %.16s..., %zu channel(s), %zu contact(s)\n",
             cfg_.name.c_str(), id_.publicKeyHex.c_str(), channels_.size(), contacts_.size());
     startTime_ = time(nullptr);
@@ -159,6 +160,40 @@ void Node::loadContactsFile() {
     fclose(f);
 }
 
+void Node::loadPrefs() {
+    pathHashMode_ = (uint8_t)cfg_.path_hash_mode;
+    FILE* f = fopen(cfg_.prefs_file.c_str(), "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#') continue;
+        char key[64] = {0}, val[160] = {0};
+        if (sscanf(line, "%63[^=]=%159[^\n]", key, val) != 2) continue;
+        std::string k(key), v(val);
+        while (!k.empty() && k.back() == ' ') k.pop_back();
+        while (!v.empty() && (v.front() == ' ')) v.erase(v.begin());
+        if (k == "path_hash_mode") pathHashMode_ = (uint8_t)atoi(v.c_str());
+        else if (k == "scope_name") scopeName_ = v;
+        else if (k == "scope_key" && v.size() == 32) {
+            try { scopeKey_ = hexToBytes(v); } catch (...) { scopeKey_.clear(); }
+        }
+    }
+    fclose(f);
+}
+
+void Node::savePrefs() {
+    FILE* f = fopen(cfg_.prefs_file.c_str(), "w");
+    if (!f) return;
+    chmod(cfg_.prefs_file.c_str(), 0600);
+    fprintf(f, "# written by meshcore-sdr-node; settings the app can change\n");
+    fprintf(f, "path_hash_mode=%u\n", pathHashMode_);
+    if (!scopeName_.empty() && scopeKey_.size() == 16) {
+        fprintf(f, "scope_name=%s\n", scopeName_.c_str());
+        fprintf(f, "scope_key=%s\n", bytesToHex(scopeKey_).c_str());
+    }
+    fclose(f);
+}
+
 void Node::setAppSender(AppSender sender) {
     std::lock_guard<std::mutex> lk(mtx_);
     appSender_ = std::move(sender);
@@ -203,10 +238,9 @@ std::vector<uint8_t> Node::buildDeviceInfo() {
     strncpy((char*)f.data() + 20, manu, 39);
     strncpy((char*)f.data() + 60, "sdr-node 0.2", 19);
     f[80] = 0;                      // client_repeat
-    // path_hash_mode: width = mode + 1. This mesh is predominantly 2-byte
-    // (measured ~69% of received packets), and traces that work use 2-byte
-    // hashes, so tell the app to build paths the same way.
-    f[81] = 1;
+    // path_hash_mode: width = mode + 1. Defaults to 1 (2-byte) because this
+    // mesh is predominantly 2-byte, but the app can change it (CMD 61).
+    f[81] = pathHashMode_;
     return f;
 }
 
@@ -346,6 +380,60 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
             break;
         }
         send(r);
+        break;
+    }
+    case CMD_GET_DEVICE_TIME: {
+        std::vector<uint8_t> r{RESP_CURR_TIME};
+        putU32(r, (uint32_t)time(nullptr));
+        send(r);
+        break;
+    }
+    case CMD_SET_PATH_HASH_MODE: {
+        // [61][0][mode]; width = mode + 1, and firmware rejects 3 and up
+        if (f.size() < 3 || f[1] != 0) { send({RESP_ERR, 6}); break; }
+        if (f[2] >= 3) { send({RESP_ERR, 6 /*illegal arg*/}); break; }
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            pathHashMode_ = f[2];
+            savePrefs();
+        }
+        send({RESP_OK});
+        fprintf(stderr, "[node] path hash mode %u (%u-byte hashes)\n",
+                f[2], f[2] + 1);
+        break;
+    }
+    case CMD_GET_DEFAULT_FLOOD_SCOPE: {
+        // [28] alone means "no scope"; otherwise [28][name 31][key 16]
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (scopeName_.empty() || scopeKey_.size() != 16) {
+            send({RESP_DEFAULT_FLOOD_SCOPE});
+        } else {
+            std::vector<uint8_t> r(1 + 31 + 16, 0);
+            r[0] = RESP_DEFAULT_FLOOD_SCOPE;
+            memcpy(r.data() + 1, scopeName_.c_str(),
+                   std::min<size_t>(30, scopeName_.size()));
+            memcpy(r.data() + 32, scopeKey_.data(), 16);
+            send(r);
+        }
+        break;
+    }
+    case CMD_SET_DEFAULT_FLOOD_SCOPE: {
+        // A short frame clears the scope; a full one sets name + 16-byte key
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (f.size() >= 1 + 31 + 16) {
+            std::string name((const char*)f.data() + 1,
+                             strnlen((const char*)f.data() + 1, 31));
+            if (name.empty() || name.size() >= 31) { send({RESP_ERR, 6}); break; }
+            scopeName_ = name;
+            scopeKey_.assign(f.begin() + 32, f.begin() + 48);
+            fprintf(stderr, "[node] default flood scope set: '%s'\n", name.c_str());
+        } else {
+            scopeName_.clear();
+            scopeKey_.clear();
+            fprintf(stderr, "[node] default flood scope cleared\n");
+        }
+        savePrefs();
+        send({RESP_OK});
         break;
     }
     case CMD_GET_CHANNEL: {

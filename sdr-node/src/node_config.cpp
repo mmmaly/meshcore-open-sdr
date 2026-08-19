@@ -35,6 +35,8 @@ NodeConfig NodeConfig::load(const std::string& path, std::string& err) {
         else if (k == "identity_file") c.identity_file = v;
         else if (k == "channels_file") c.channels_file = v;
         else if (k == "contacts_file") c.contacts_file = v;
+        else if (k == "prefs_file") c.prefs_file = v;
+        else if (k == "path_hash_mode") c.path_hash_mode = atoi(v.c_str());
         else if (k == "lat") c.lat = atof(v.c_str());
         else if (k == "lon") c.lon = atof(v.c_str());
         else if (k == "port") c.port = atoi(v.c_str());

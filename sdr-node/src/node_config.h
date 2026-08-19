@@ -22,6 +22,8 @@ struct NodeConfig {
     std::string identity_file = "identity.key";
     std::string channels_file = "channels.txt";
     std::string contacts_file = "contacts.txt";
+    std::string prefs_file = "prefs.txt";
+    int path_hash_mode = 1;          // width = mode + 1; this mesh is 2-byte
     std::optional<double> lat, lon;
 
     // TCP server

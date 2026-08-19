@@ -49,9 +49,11 @@ chip listens to one. Set `log_rx_data = 0` to turn it off.
 Node discovery works (zero-hop CONTROL packets, so only direct neighbours
 answer), including the follow-up "request name": an anonymous request
 (CMD 57) carries our full public key so a node we have never met can
-derive the shared secret and reply, and the answer is matched back by tag, and GRP_DATA blobs - the transport the app uses for images - are
-carried both ways. DEVICE_INFO reports feature level 13, matching firmware
-v1.17.1, because everything that level gates is implemented.
+derive the shared secret and reply, and the answer is matched back by tag.
+GRP_DATA blobs - the transport the app uses for images - are carried both
+ways. DEVICE_INFO reports feature level 13, matching firmware v1.17.1,
+because everything that level gates is implemented. Device settings the app
+can change (path hash mode, default flood scope) persist in `prefs_file`.
 
 **Not yet:** acting as a repeater (deliberately - at ~25 mW it would be a
 weak one, and it would double the node's airtime).
@@ -132,5 +134,8 @@ that breaks the wire format fails the test rather than the mesh.
   figure) by idling after each frame - a long message on SF11/12 can make
   the *next* send wait. Keep the TX channel inside that sub-band or lower
   `tx_duty` to 1.
-- Battery/storage are cosmetic answers (mains powered); stats/telemetry/
-  repeater login are not implemented.
+- Battery and storage are cosmetic answers - the host is mains powered and
+  has no cell to report. Self-telemetry likewise reports no sensors.
+- The default flood scope is stored and reported but does not change what
+  is radiated, matching `BaseChatMesh::sendFloodScoped`, which is a plain
+  flood at this layer.

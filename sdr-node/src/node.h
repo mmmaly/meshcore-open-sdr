@@ -55,6 +55,10 @@ enum Cmd : uint8_t {
     CMD_SEND_PATH_DISCOVERY_REQ = 52,
     CMD_SEND_CHANNEL_DATA = 62,
     CMD_GET_STATS = 56,
+    CMD_GET_DEVICE_TIME = 5,
+    CMD_SET_PATH_HASH_MODE = 61,
+    CMD_SET_DEFAULT_FLOOD_SCOPE = 63,
+    CMD_GET_DEFAULT_FLOOD_SCOPE = 64,
     CMD_SET_AUTO_ADD_CONFIG = 58,
     CMD_GET_AUTO_ADD_CONFIG = 59,
 };
@@ -77,6 +81,8 @@ enum Resp : uint8_t {
     RESP_CUSTOM_VARS = 21,
     RESP_AUTO_ADD_CONFIG = 25,
     RESP_CHANNEL_DATA_RECV = 27,
+    RESP_CURR_TIME = 9,
+    RESP_DEFAULT_FLOOD_SCOPE = 28,
 };
 
 enum Push : uint8_t {
@@ -178,6 +184,8 @@ private:
     // Shared secret for a contact, computed once and cached
     const std::string& contactSecret(Contact& c);
     void persistContacts();
+    void loadPrefs();
+    void savePrefs();
     void loadContactsFile();
     std::vector<uint8_t> buildDeviceInfo();
     std::vector<uint8_t> buildContactFrame(const Contact& c, uint8_t code);
@@ -201,6 +209,10 @@ private:
     float lastSnr_ = 0.0f;
     double txAirSecs_ = 0.0, rxAirSecs_ = 0.0;
     time_t startTime_ = 0;
+    // Settings the app can change and firmware persists via savePrefs()
+    uint8_t pathHashMode_ = 1;          // width = mode + 1
+    std::string scopeName_;             // default flood scope (<=30 chars)
+    std::vector<uint8_t> scopeKey_;     // 16 bytes, empty = no scope
 
     std::thread txThread_;
     std::condition_variable txCv_;

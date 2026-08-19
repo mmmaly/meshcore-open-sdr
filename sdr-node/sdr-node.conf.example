@@ -14,6 +14,11 @@ log_rx_data = 1
 # Files created/managed by the daemon (identity on first run)
 identity_file = identity.key
 channels_file = channels.txt
+contacts_file = contacts.txt
+# Settings the app can change at runtime (path hash mode, flood scope)
+prefs_file = prefs.txt
+# Path hash width - 1 (0 = 1-byte, 1 = 2-byte). The app can change this.
+path_hash_mode = 1
 
 # --- Receive: RTL-SDR via lora_rx ---
 rx_binary = /home/mmm/LoraReceiverStandalone/lora_rx
