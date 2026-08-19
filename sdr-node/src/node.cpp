@@ -123,7 +123,10 @@ std::vector<uint8_t> Node::buildSelfInfo() {
     f.push_back(0);   // multi_acks
     f.push_back(0);   // advert_loc_policy
     f.push_back(0);   // telemetry modes
-    f.push_back(1);   // manual-add byte: 1 => app treats auto-add as enabled
+    f.push_back(0);   // manual_add_contacts: firmware semantics, 0 = the node
+                      // auto-adds contacts from adverts (which this one does).
+                      // Sending 1 put the official app in manual mode and it
+                      // silently ignored every NEW_ADVERT push.
     putU32(f, cfg_.tx_freq);
     putU32(f, cfg_.bw);
     f.push_back((uint8_t)cfg_.tx_sf);
