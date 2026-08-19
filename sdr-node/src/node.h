@@ -49,6 +49,7 @@ enum Cmd : uint8_t {
     CMD_GET_CUSTOM_VAR = 40,
     CMD_SET_FLOOD_SCOPE = 54,
     CMD_SEND_CONTROL_DATA = 55,
+    CMD_SEND_ANON_REQ = 57,
     CMD_SEND_CHANNEL_DATA = 62,
     CMD_GET_STATS = 56,
     CMD_SET_AUTO_ADD_CONFIG = 58,
@@ -79,6 +80,7 @@ enum Push : uint8_t {
     PUSH_ADVERT = 0x80,
     PUSH_MSG_WAITING = 0x83,
     PUSH_NEW_ADVERT = 0x8A,
+    PUSH_BINARY_RESPONSE = 0x8C,
     PUSH_CONTROL_DATA = 0x8E,
 };
 
@@ -108,7 +110,7 @@ struct PendingAck {
 
 // An outstanding repeater request awaiting its RESPONSE payload
 struct PendingReq {
-    enum Kind { Login, Status, Cli } kind = Login;
+    enum Kind { Login, Status, Cli, Anon } kind = Login;
     std::vector<uint8_t> pubKey;   // 32
     uint32_t tag = 0;
     double sentAt = 0.0;
@@ -157,6 +159,7 @@ private:
     void handleAddUpdateContact(const std::vector<uint8_t>& f, const AppSender& send);
     void handleRepeaterRequest(const std::vector<uint8_t>& f, const AppSender& send,
                                PendingReq::Kind kind);
+    void handleAnonRequest(const std::vector<uint8_t>& f, const AppSender& send);
     // Route a datagram to a contact: direct over a learned path, else flood
     bool sendToContact(const Contact& c, PayloadTypeTag type,
                        const std::vector<uint8_t>& payload);

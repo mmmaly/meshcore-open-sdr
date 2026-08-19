@@ -585,6 +585,36 @@ with open(tx_record) as f:
                 gd_tx = b
 check(gd_tx is not None, "channel data radiated as a GRP_DATA packet")
 
+# 6h. Anonymous request to a node we have never met (the "request name"
+# flow after discovery): must create the contact, radiate an ANON_REQ that
+# carries our full public key, and match the reply back by tag.
+unknown_pub = "aa" * 32
+c.send(bytes([57]) + bytes.fromhex(unknown_pub) + bytes([0x01, 0x00]))
+r = recv_resp()
+check(r[0] == 6 and len(r) >= 10, "ANON_REQ answered with RESP_SENT")
+anon_tag = struct.unpack_from("<I", r, 2)[0] if len(r) >= 10 else 0
+check(anon_tag != 0, "ANON_REQ reply carries a tag for matching")
+time.sleep(0.6)
+anon_tx = None
+with open(tx_record) as f:
+    for line in f:
+        a2 = line.split()
+        if "-x" in a2:
+            b = bytes.fromhex(a2[a2.index("-x") + 1])
+            if (b[0] >> 2) & 0x0F == 0x07:
+                anon_tx = b
+check(anon_tx is not None, "ANON_REQ radiated as an ANON_REQ packet")
+if anon_tx:
+    check(anon_tx[2] == 0xAA, "ANON_REQ dest hash is the target node")
+    self_pub = bytes.fromhex(node_pub) if node_pub else None
+    if self_pub:
+        check(anon_tx[3:35] == self_pub,
+              "ANON_REQ carries our full public key (so a stranger can reply)")
+# the unknown node must now exist as a contact
+c.send(bytes([30]) + bytes.fromhex(unknown_pub))
+r = recv_resp()
+check(r[0] == 3 and len(r) == 148, "anon target was added as a contact")
+
 # 7. Unknown command -> RESP_ERR, daemon stays alive
 c.send(bytes([99]))
 r = recv_resp()

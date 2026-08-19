@@ -446,6 +446,9 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
     case CMD_SEND_TXT_MSG:
         handleSendDirectText(f, send);
         break;
+    case CMD_SEND_ANON_REQ:
+        handleAnonRequest(f, send);
+        break;
     case CMD_SEND_CONTROL_DATA: {
         // [55][payload...]; payload[0] high bit marks the discover subtype.
         // Firmware sends these zero-hop, so only direct neighbours answer -
@@ -716,6 +719,68 @@ bool Node::sendToContact(const Contact& c, PayloadTypeTag type,
 // CMD_SEND_LOGIN [26][pub32][password..], CMD_SEND_STATUS_REQ [27][pub32],
 // and CLI text (CMD_SEND_TXT_MSG with txt_type=1) all end up here: an
 // encrypted request to a repeater whose RESPONSE we then match by tag.
+// [57][pub_key32][data...] - an anonymous request: the payload carries our
+// full public key, so a node that has never met us can still derive the
+// shared secret and answer. This is how the app asks a freshly discovered
+// node for its name.
+void Node::handleAnonRequest(const std::vector<uint8_t>& f, const AppSender& send) {
+    if (f.size() < 34) { send({RESP_ERR, 6}); return; }
+    std::string key = toLower(bytesToHex(f.data() + 1, 32));
+
+    Contact target;
+    std::string secret;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        auto it = contacts_.find(key);
+        if (it == contacts_.end()) {
+            // Firmware 13+ allows requests to non-contacts: it adds an
+            // anonymous entry defaulting to zero-hop direct. Discovery hands
+            // us exactly such a node - known by key, never yet heard from.
+            Contact anon;
+            anon.pubKey.assign(f.begin() + 1, f.begin() + 33);
+            anon.type = 0;               // role unknown until it answers
+            anon.outPathLen = 0;         // zero-hop direct
+            anon.lastMod = (uint32_t)time(nullptr);
+            it = contacts_.emplace(key, anon).first;
+            fprintf(stderr, "[node] anon contact added for %.12s...\n", key.c_str());
+        }
+        secret = contactSecret(it->second);
+        target = it->second;
+    }
+
+    uint32_t tag = (uint32_t)time(nullptr);
+    std::vector<uint8_t> plain;
+    putU32(plain, tag);
+    plain.insert(plain.end(), f.begin() + 33, f.end());   // request body verbatim
+
+    auto mac = PeerCrypto::encryptThenMac(secret, plain);
+    std::vector<uint8_t> payload;
+    payload.push_back(target.pubKey[0]);                  // dest hash
+    auto myPub = hexToBytes(id_.publicKeyHex);
+    payload.insert(payload.end(), myPub.begin(), myPub.end());   // full sender key
+    payload.insert(payload.end(), mac.begin(), mac.end());
+
+    if (!sendToContact(target, PayloadTypeTag::AnonReq, payload)) {
+        send({RESP_ERR, 4});
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        pendingReqs_.push_back({PendingReq::Anon, target.pubKey, tag, (double)time(nullptr)});
+        while (pendingReqs_.size() > 16) pendingReqs_.pop_front();
+        persistContacts();
+    }
+
+    // SENT: [6][is_flood][tag4][est_timeout4] - the app matches the tag to
+    // the BINARY_RESPONSE push that follows
+    std::vector<uint8_t> r{RESP_SENT, (uint8_t)(target.outPathLen == 0xFF ? 1 : 0)};
+    putU32(r, tag);
+    putU32(r, 20000);
+    send(r);
+    fprintf(stderr, "[node] anon request sent to %.12s... (tag %08X, %zu byte body)\n",
+            key.c_str(), tag, f.size() - 33);
+}
+
 void Node::handleRepeaterRequest(const std::vector<uint8_t>& f, const AppSender& send,
                                  PendingReq::Kind kind) {
     size_t keyOff = 1;
@@ -825,6 +890,16 @@ void Node::onContactResponse(const Contact& c, const std::vector<uint8_t>& data,
             fprintf(stderr, "[node] login REJECTED at %s\n", c.name.c_str());
         }
         sender(p);
+    } else if (req.kind == PendingReq::Anon) {
+        // PUSH_BINARY_RESPONSE: [0x8C][reserved][tag4][body...] - the app
+        // matches the tag against the RESP_SENT it got for the request.
+        std::vector<uint8_t> p{PUSH_BINARY_RESPONSE, 0};
+        putU32(p, tag);
+        p.insert(p.end(), data.begin() + 4, data.end());
+        if (p.size() > 172) p.resize(172);
+        sender(p);
+        fprintf(stderr, "[node] anon response from %.12s... (%zu bytes)\n",
+                bytesToHex(c.pubKey).c_str(), data.size() - 4);
     } else if (req.kind == PendingReq::Cli) {
         // Deliver as a CLI_DATA contact message so the app's repeater
         // console shows the reply text

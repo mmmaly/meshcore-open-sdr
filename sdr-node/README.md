@@ -39,7 +39,9 @@ Trace paths work: the app's path-trace map can probe a route and get the
 per-hop SNRs back.
 
 Node discovery works (zero-hop CONTROL packets, so only direct neighbours
-answer), and GRP_DATA blobs - the transport the app uses for images - are
+answer), including the follow-up "request name": an anonymous request
+(CMD 57) carries our full public key so a node we have never met can
+derive the shared secret and reply, and the answer is matched back by tag, and GRP_DATA blobs - the transport the app uses for images - are
 carried both ways. DEVICE_INFO reports feature level 13, matching firmware
 v1.17.1, because everything that level gates is implemented.
 
