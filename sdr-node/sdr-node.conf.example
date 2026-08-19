@@ -5,6 +5,9 @@ name = SDR Node
 port = 5000
 # Flood a self-advert every N minutes (0 = only manual/-a)
 advert_interval_min = 240
+# Push every heard packet to the app (raw packet monitor). The SDR hears a
+# lot more than a single-channel node, so set 0 if the app feels noisy.
+log_rx_data = 1
 # lat = 48.1486
 # lon = 17.1077
 

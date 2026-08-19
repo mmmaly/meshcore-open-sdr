@@ -36,7 +36,15 @@ back to the pending command, including responses that arrive folded into
 a PATH return.
 
 Trace paths work: the app's path-trace map can probe a route and get the
-per-hop SNRs back.
+per-hop SNRs back. **Path discovery** (a forced-flood telemetry request)
+finds routes to nodes no route is known for, and telemetry/binary requests
+fetch sensor and status data from peers.
+
+**Raw packet monitor**: every packet heard is pushed to the app as
+`PUSH_LOG_RX_DATA`, before any dedup or filtering, so the app's packet view
+shows the whole mesh. This is where the SDR beats a real node - it watches
+every configured channel and spreading factor simultaneously, where a LoRa
+chip listens to one. Set `log_rx_data = 0` to turn it off.
 
 Node discovery works (zero-hop CONTROL packets, so only direct neighbours
 answer), including the follow-up "request name": an anonymous request
@@ -95,8 +103,9 @@ The test drives the real daemon over a real socket, speaking the app's
 exact framing, and walks the connect handshake field by field, channel
 sync, the offline queue, contacts, channel and direct messages, delivery
 ACKs, routing (a PATH return must teach a route and the next message must
-radiate over it), traces, discovery, channel data and anonymous requests -
-asserting on the bytes actually handed to the transmitter. 87 assertions.
+radiate over it), traces, discovery, channel data, anonymous requests, the
+raw monitor, path discovery and telemetry - asserting on the bytes actually
+handed to the transmitter. 95 assertions.
 
 Packets injected into the fake receiver are built by the real encoder, and
 "transmitted" packets are decoded back with the real decoder, so a change

@@ -619,6 +619,78 @@ c.send(bytes([30]) + bytes.fromhex(unknown_pub))
 r = recv_resp()
 check(r[0] == 3 and len(r) == 148, "anon target was added as a contact")
 
+# 6i. Raw packet monitor: every heard packet is pushed verbatim
+raw_seen = [p for p in pushes if p and p[0] == 0x88]
+c.send(bytes([10])); recv_resp()      # drain, letting pushes accumulate
+raw_seen += [p for p in pushes if p and p[0] == 0x88]
+check(len(raw_seen) > 0, f"PUSH_LOG_RX_DATA emitted for heard packets ({len(raw_seen)})")
+if raw_seen:
+    # the advert we injected must appear verbatim in some raw push
+    adv = bytes.fromhex(packets["ADVERT"])
+    check(any(p[3:] == adv for p in raw_seen),
+          "a raw push carries the received packet byte-for-byte")
+
+# 6j. Path discovery: forced flood, and the reply pushed as 0x8D
+if "PEERPUB" in packets:
+    c.send(bytes([52, 0]) + bytes.fromhex(packets["PEERPUB"]))
+    r = recv_resp()
+    check(r[0] == 6 and r[1] == 1, "path discovery SENT, forced to flood")
+    pd_tag = struct.unpack_from("<I", r, 2)[0]
+    time.sleep(0.6)
+    pd_tx = None
+    with open(tx_record) as f:
+        for line in f:
+            a2 = line.split()
+            if "-x" in a2:
+                b = bytes.fromhex(a2[a2.index("-x") + 1])
+                if (b[0] >> 2) & 0x0F == 0x00 and (b[0] & 3) == 1:
+                    pd_tx = b
+    check(pd_tx is not None, "path discovery radiated as a flood REQ packet")
+
+    # peer answers with a RESPONSE carrying the tag
+    env = dict(os.environ); env["NODE_PUB"] = node_pub or ""
+    out = subprocess.run([PACKETGEN, "resp", struct.pack("<I", pd_tag).hex(), "aabb"],
+                         capture_output=True, text=True, env=env).stdout
+    resp_pkt = dict(l.split() for l in out.splitlines()).get("RESPPKT", "").lower()
+    if resp_pkt:
+        with open(rx_log, "a") as f:
+            f.write(f"rx cfg: freq=869618000 sf=7 bw=62500 snr=3.0 cfo=0.00 time={time.time():.3f}\n")
+            f.write(f"rx ok: {resp_pkt}\n")
+        got_pd = None
+        deadline = time.time() + 6
+        while time.time() < deadline and got_pd is None:
+            try:
+                p = c.recv(1.0)
+            except socket.timeout:
+                continue
+            if p and p[0] == 0x8D:
+                got_pd = p
+            elif p and p[0] >= 0x80:
+                pushes.append(p)
+        check(got_pd is not None, "PUSH_PATH_DISCOVERY_RESPONSE for the reply")
+        if got_pd:
+            check(got_pd[2:8] == bytes.fromhex(packets["PEERPUB"])[:6],
+                  "path discovery push carries the peer prefix")
+
+# 6k. Telemetry: self-query answers immediately (as a push code, so read raw)
+c.send(bytes([39, 0, 0, 0]))
+got_telem = None
+deadline = time.time() + 5
+while time.time() < deadline and got_telem is None:
+    try:
+        p = c.recv(1.0)
+    except socket.timeout:
+        break
+    if p and p[0] == 0x8B:
+        got_telem = p
+    elif p:
+        pushes.append(p)
+check(got_telem is not None, "self telemetry answered with PUSH_TELEMETRY_RESPONSE")
+if got_telem:
+    self_pub = bytes.fromhex(node_pub) if node_pub else None
+    if self_pub:
+        check(got_telem[2:8] == self_pub[:6], "self telemetry carries our own prefix")
+
 # 7. Unknown command -> RESP_ERR, daemon stays alive
 c.send(bytes([99]))
 r = recv_resp()

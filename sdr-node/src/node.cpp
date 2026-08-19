@@ -446,6 +446,43 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
     case CMD_SEND_TXT_MSG:
         handleSendDirectText(f, send);
         break;
+    case CMD_SEND_TELEMETRY_REQ: {
+        // [39][3 reserved] = our own telemetry; with a pubkey = ask a peer
+        if (f.size() == 4) {
+            // Self telemetry: [0x8B][reserved][our prefix6][telemetry blob].
+            // An SDR node has no battery or sensors, so report what is
+            // actually true - the host is mains powered.
+            std::vector<uint8_t> p{PUSH_TELEMETRY_RESPONSE, 0};
+            auto myPub = hexToBytes(id_.publicKeyHex);
+            p.insert(p.end(), myPub.begin(), myPub.begin() + 6);
+            send(p);
+            break;
+        }
+        if (f.size() < 4 + 32) { send({RESP_ERR, 6}); break; }
+        std::vector<uint8_t> body{3 /*REQ_TYPE_GET_TELEMETRY_DATA*/, 0, 0, 0, 0};
+        for (int i = 0; i < 4; i++) body.push_back((uint8_t)(rand() & 0xFF));
+        sendContactRequest(f, 4, body, PendingReq::Telemetry, send, false);
+        break;
+    }
+    case CMD_SEND_BINARY_REQ: {
+        // [50][pubkey32][req body...] - body passed through verbatim
+        if (f.size() < 1 + 32 + 1) { send({RESP_ERR, 6}); break; }
+        std::vector<uint8_t> body(f.begin() + 33, f.end());
+        sendContactRequest(f, 1, body, PendingReq::Binary, send, false);
+        break;
+    }
+    case CMD_SEND_PATH_DISCOVERY_REQ: {
+        // [52][0][pubkey32]. Firmware notes this is "just a special case of
+        // flood + telemetry req": force flood so every route is exercised,
+        // and the PATH return that comes back teaches us the way there.
+        if (f.size() < 2 + 32 || f[1] != 0) { send({RESP_ERR, 6}); break; }
+        std::vector<uint8_t> body{3 /*REQ_TYPE_GET_TELEMETRY_DATA*/,
+                                  (uint8_t)~0x01 /*inverse perms: BASE only*/,
+                                  0, 0, 0};
+        for (int i = 0; i < 4; i++) body.push_back((uint8_t)(rand() & 0xFF));
+        sendContactRequest(f, 2, body, PendingReq::PathDiscovery, send, true);
+        break;
+    }
     case CMD_SEND_ANON_REQ:
         handleAnonRequest(f, send);
         break;
@@ -723,6 +760,67 @@ bool Node::sendToContact(const Contact& c, PayloadTypeTag type,
 // full public key, so a node that has never met us can still derive the
 // shared secret and answer. This is how the app asks a freshly discovered
 // node for its name.
+// Build and send an encrypted REQ to a contact whose public key sits at
+// `keyOff` in the command frame. forceFlood is what makes path discovery
+// different from an ordinary request.
+void Node::sendContactRequest(const std::vector<uint8_t>& f, size_t keyOff,
+                              const std::vector<uint8_t>& body,
+                              PendingReq::Kind kind, const AppSender& send,
+                              bool forceFlood) {
+    if (f.size() < keyOff + 32) { send({RESP_ERR, 6}); return; }
+    std::string key = toLower(bytesToHex(f.data() + keyOff, 32));
+
+    Contact target;
+    std::string secret;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        auto it = contacts_.find(key);
+        if (it == contacts_.end()) { send({RESP_ERR, 2}); return; }
+        secret = contactSecret(it->second);
+        target = it->second;
+    }
+
+    uint32_t tag = (uint32_t)time(nullptr);
+    std::vector<uint8_t> plain;
+    putU32(plain, tag);
+    plain.insert(plain.end(), body.begin(), body.end());
+
+    auto mac = PeerCrypto::encryptThenMac(secret, plain);
+    std::vector<uint8_t> payload;
+    payload.push_back(target.pubKey[0]);
+    payload.push_back(hexToBytes(id_.publicKeyHex)[0]);
+    payload.insert(payload.end(), mac.begin(), mac.end());
+
+    bool flooded;
+    if (forceFlood || target.outPathLen == 0xFF) {
+        auto pkt = MeshCorePacketEncoder::buildPacket(RouteType::Flood,
+                                                      PayloadType::Request, payload);
+        if (!pkt.success) { send({RESP_ERR, 4}); return; }
+        enqueueTx(toLower(bytesToHex(pkt.bytes)));
+        flooded = true;
+    } else {
+        auto pkt = MeshCorePacketEncoder::buildPacket(
+            RouteType::Direct, PayloadType::Request, payload, target.outPath,
+            (uint8_t)(((target.outPathLen >> 6) & 3) + 1));
+        if (!pkt.success) { send({RESP_ERR, 4}); return; }
+        enqueueTx(toLower(bytesToHex(pkt.bytes)));
+        flooded = false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        seen_[toLower(bytesToHex(payload))] = (double)time(nullptr);
+        pendingReqs_.push_back({kind, target.pubKey, tag, (double)time(nullptr)});
+        while (pendingReqs_.size() > 16) pendingReqs_.pop_front();
+    }
+
+    std::vector<uint8_t> r{RESP_SENT, (uint8_t)(flooded ? 1 : 0)};
+    putU32(r, tag);
+    putU32(r, flooded ? 30000 : 12000);
+    send(r);
+    fprintf(stderr, "[node] request kind %d to %.12s... (tag %08X, %s)\n",
+            (int)kind, key.c_str(), tag, flooded ? "flood" : "routed");
+}
+
 void Node::handleAnonRequest(const std::vector<uint8_t>& f, const AppSender& send) {
     if (f.size() < 34) { send({RESP_ERR, 6}); return; }
     std::string key = toLower(bytesToHex(f.data() + 1, 32));
@@ -912,6 +1010,27 @@ void Node::onContactResponse(const Contact& c, const std::vector<uint8_t>& data,
             fprintf(stderr, "[node] login REJECTED at %s\n", c.name.c_str());
         }
         sender(p);
+    } else if (req.kind == PendingReq::Telemetry ||
+               req.kind == PendingReq::Binary ||
+               req.kind == PendingReq::PathDiscovery) {
+        // [code][reserved][pubkey prefix6 or tag4][body...]
+        std::vector<uint8_t> p;
+        if (req.kind == PendingReq::Binary) {
+            p = {PUSH_BINARY_RESPONSE, 0};
+            putU32(p, tag);
+        } else {
+            p = {(uint8_t)(req.kind == PendingReq::Telemetry
+                               ? PUSH_TELEMETRY_RESPONSE
+                               : PUSH_PATH_DISCOVERY_RESPONSE), 0};
+            p.insert(p.end(), c.pubKey.begin(), c.pubKey.begin() + 6);
+        }
+        p.insert(p.end(), data.begin() + 4, data.end());
+        if (p.size() > 172) p.resize(172);
+        sender(p);
+        fprintf(stderr, "[node] %s response from %s (%zu bytes)\n",
+                req.kind == PendingReq::Telemetry ? "telemetry"
+                    : req.kind == PendingReq::Binary ? "binary" : "path-discovery",
+                c.name.empty() ? "?" : c.name.c_str(), data.size() - 4);
     } else if (req.kind == PendingReq::Anon) {
         // PUSH_BINARY_RESPONSE: [0x8C][reserved][tag4][body...] - the app
         // matches the tag against the RESP_SENT it got for the request.
@@ -1075,6 +1194,29 @@ void Node::queueForApp(std::vector<uint8_t> frame) {
 
 void Node::onRxPacket(const RxPacket& pkt) {
     lastSnr_ = pkt.snr;
+
+    // Raw monitor, before any dedup or filtering: the app's packet view
+    // wants everything we heard, repeats included. Firmware logs at the
+    // radio layer the same way; the difference is that this receiver is
+    // watching every configured channel and spreading factor at once.
+    if (cfg_.log_rx_data) {
+        auto raw = hexToBytes(pkt.hex);
+        if (raw.size() + 3 <= 172) {
+            int snr4 = (int)lrintf(pkt.snr * 4.0f);
+            std::vector<uint8_t> p{PUSH_LOG_RX_DATA,
+                (uint8_t)(int8_t)std::max(-128, std::min(127, snr4)),
+                // lora_rx reports SNR only; approximate RSSI from a typical
+                // 868 MHz noise floor so the field is not simply a lie
+                (uint8_t)(int8_t)std::max(-128, std::min(127, (int)(-105 + pkt.snr)))};
+            p.insert(p.end(), raw.begin(), raw.end());
+            AppSender sender;
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                sender = appSender_;
+            }
+            if (sender) sender(p);
+        }
+    }
     {
         std::lock_guard<std::mutex> lk(mtx_);
         rxAirSecs_ += estimateAirtime(pkt.hex.size() / 2);
