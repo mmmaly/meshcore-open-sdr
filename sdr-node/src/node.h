@@ -55,6 +55,7 @@ enum Resp : uint8_t {
     RESP_SELF_INFO = 5,
     RESP_SENT = 6,
     RESP_CONTACT_MSG_RECV = 7,
+    RESP_CONTACT_MSG_RECV_V3 = 16,
     RESP_CHANNEL_MSG_RECV = 8,
     RESP_NO_MORE_MESSAGES = 10,
     RESP_BATT_AND_STORAGE = 12,
@@ -77,6 +78,13 @@ struct Contact {
     uint32_t lastAdvert = 0;
     uint32_t lastMod = 0;
     int32_t lat = 0, lon = 0;      // x1e6, 0 = unknown
+    std::string secretHex;         // cached ECDH shared secret (lazy)
+};
+
+// A sent direct message whose delivery ACK we are waiting for
+struct PendingAck {
+    uint32_t ack = 0;
+    double sentAt = 0.0;
 };
 
 // A frame waiting for the app's CMD_SYNC_NEXT_MESSAGE pull
@@ -116,6 +124,12 @@ private:
     void enqueueTx(std::string hex);
     void txWorker();
     std::vector<uint8_t> buildSelfInfo();
+    void handleSendDirectText(const std::vector<uint8_t>& f, const AppSender& send);
+    void handleAddUpdateContact(const std::vector<uint8_t>& f, const AppSender& send);
+    // Shared secret for a contact, computed once and cached
+    const std::string& contactSecret(Contact& c);
+    void persistContacts();
+    void loadContactsFile();
     std::vector<uint8_t> buildDeviceInfo();
     std::vector<uint8_t> buildContactFrame(const Contact& c, uint8_t code);
     void handleSendChannelText(const std::vector<uint8_t>& f, const AppSender& send);
@@ -131,6 +145,7 @@ private:
     std::map<std::string, Contact> contacts_;       // key: pubkey hex
     std::deque<QueuedMessage> inbox_;
     std::map<std::string, double> seen_;            // payload hash -> time
+    std::deque<PendingAck> pendingAcks_;
     AppSender appSender_;
     float lastSnr_ = 0.0f;
 

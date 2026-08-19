@@ -4,6 +4,7 @@
 #include <cstring>
 #include <ctime>
 #include <algorithm>
+#include <sys/stat.h>
 
 #include "meshcore/meshcore.h"
 
@@ -28,8 +29,9 @@ static std::string toLower(std::string s) {
 Node::Node(const NodeConfig& cfg, const NodeIdentity& id, SdrRadio& radio)
     : cfg_(cfg), id_(id), radio_(radio) {
     channels_ = loadChannels(cfg_.channels_file);
-    fprintf(stderr, "[node] %s, pubkey %.16s..., %zu channel(s)\n",
-            cfg_.name.c_str(), id_.publicKeyHex.c_str(), channels_.size());
+    loadContactsFile();
+    fprintf(stderr, "[node] %s, pubkey %.16s..., %zu channel(s), %zu contact(s)\n",
+            cfg_.name.c_str(), id_.publicKeyHex.c_str(), channels_.size(), contacts_.size());
     txThread_ = std::thread(&Node::txWorker, this);
 }
 
@@ -62,6 +64,47 @@ void Node::txWorker() {
             fprintf(stderr, "[node] tx failed for a queued packet\n");
         lk.lock();
     }
+}
+
+const std::string& Node::contactSecret(Contact& c) {
+    if (c.secretHex.empty())
+        c.secretHex = PeerCrypto::keyExchange(id_.privateKeyHex, bytesToHex(c.pubKey));
+    return c.secretHex;
+}
+
+void Node::persistContacts() {
+    FILE* f = fopen(cfg_.contacts_file.c_str(), "w");
+    if (!f) return;
+    chmod(cfg_.contacts_file.c_str(), 0600);
+    fprintf(f, "# pubkey\ttype\tlast_advert\tlast_mod\tlat\tlon\tname\n");
+    for (const auto& [k, c] : contacts_)
+        fprintf(f, "%s\t%u\t%u\t%u\t%d\t%d\t%s\n", k.c_str(), c.type,
+                c.lastAdvert, c.lastMod, c.lat, c.lon, c.name.c_str());
+    fclose(f);
+}
+
+void Node::loadContactsFile() {
+    FILE* f = fopen(cfg_.contacts_file.c_str(), "r");
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#') continue;
+        char key[130] = {0}, name[64] = {0};
+        unsigned type = 1, adv = 0, mod = 0;
+        int lat = 0, lon = 0;
+        if (sscanf(line, "%129[^\t]\t%u\t%u\t%u\t%d\t%d\t%63[^\n]",
+                   key, &type, &adv, &mod, &lat, &lon, name) >= 7) {
+            Contact c;
+            c.pubKey = hexToBytes(key);
+            if (c.pubKey.size() != 32) continue;
+            c.type = (uint8_t)type;
+            c.lastAdvert = adv; c.lastMod = mod;
+            c.lat = lat; c.lon = lon;
+            c.name = name;
+            contacts_[toLower(key)] = c;
+        }
+    }
+    fclose(f);
 }
 
 void Node::setAppSender(AppSender sender) {
@@ -285,14 +328,103 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
         handleSendChannelText(f, send);
         break;
     case CMD_SEND_TXT_MSG:
-        // Direct messages need X25519 contact crypto - not in v1
-        send({RESP_ERR, 1 /*unsupported*/});
+        handleSendDirectText(f, send);
         break;
+    case 9 /*CMD_ADD_UPDATE_CONTACT*/:
+        handleAddUpdateContact(f, send);
+        break;
+    case 30 /*CMD_GET_CONTACT_BY_KEY*/: {
+        if (f.size() < 33) { send({RESP_ERR, 6}); break; }
+        std::lock_guard<std::mutex> lk(mtx_);
+        auto it = contacts_.find(toLower(bytesToHex(f.data() + 1, 32)));
+        if (it == contacts_.end()) send({RESP_ERR, 2});
+        else send(buildContactFrame(it->second, RESP_CONTACT));
+        break;
+    }
     default:
         fprintf(stderr, "[node] unhandled cmd 0x%02X (%zu bytes)\n", f[0], f.size());
         send({RESP_ERR, 1});
         break;
     }
+}
+
+// [2][txt_type][attempt][timestamp4][pubkey_prefix6][text...] -> ECDH secret,
+// TXT_MSG payload, flood transmit; reply SENT with the expected ack hash so
+// the app can show the delivery checkmark when the ACK comes back.
+void Node::handleSendDirectText(const std::vector<uint8_t>& f, const AppSender& send) {
+    if (f.size() < 14) { send({RESP_ERR, 6 /*illegal arg*/}); return; }
+    uint8_t txt_type = f[1];
+    if (txt_type != 0) { send({RESP_ERR, 1 /*unsupported: CLI needs login*/}); return; }
+    uint8_t attempt = f[2];
+    uint32_t ts = getU32(f.data() + 3);
+    const uint8_t* prefix = f.data() + 7;
+    std::string text((const char*)f.data() + 13, f.size() - 13);
+    auto nul = text.find('\0');
+    if (nul != std::string::npos) text.resize(nul);
+
+    std::string secret, destPubHex;
+    uint8_t destHash = 0;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        Contact* match = nullptr;
+        for (auto& [k, c] : contacts_)
+            if (memcmp(c.pubKey.data(), prefix, 6) == 0) { match = &c; break; }
+        if (!match) { send({RESP_ERR, 2 /*unknown recipient*/}); return; }
+        secret = contactSecret(*match);
+        destHash = match->pubKey[0];
+        destPubHex = bytesToHex(match->pubKey);
+    }
+
+    auto myPub = hexToBytes(id_.publicKeyHex);
+    auto payload = PeerCrypto::buildTextMessagePayload(
+        secret, destHash, myPub[0], ts, attempt, text);
+    auto pkt = MeshCorePacketEncoder::buildPacket(RouteType::Flood,
+                                                  PayloadType::TextMessage, payload);
+    if (!pkt.success) { send({RESP_ERR, 4}); return; }
+
+    uint32_t ack = PeerCrypto::calcAckHash(ts, attempt, text, id_.publicKeyHex);
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        seen_[toLower(bytesToHex(payload))] = (double)time(nullptr);
+        pendingAcks_.push_back({ack, (double)time(nullptr)});
+        while (pendingAcks_.size() > 32) pendingAcks_.pop_front();
+    }
+    enqueueTx(toLower(bytesToHex(pkt.bytes)));
+
+    // SENT: [6][is_flood=1][expected_ack4][est_timeout_ms4]
+    std::vector<uint8_t> r{RESP_SENT, 1};
+    putU32(r, ack);
+    putU32(r, 15000);
+    send(r);
+    fprintf(stderr, "[node] direct tx queued to %.12s... (%zu chars)\n",
+            destPubHex.c_str(), text.size());
+}
+
+// [9][pub32][type][flags][pathlen][path64][name32][ts4][lat4 lon4]?[lastmod4]?
+void Node::handleAddUpdateContact(const std::vector<uint8_t>& f, const AppSender& send) {
+    if (f.size() < 137) { send({RESP_ERR, 6}); return; }
+    Contact c;
+    c.pubKey.assign(f.begin() + 1, f.begin() + 33);
+    c.type = f[33];
+    char name[33] = {0};
+    memcpy(name, f.data() + 100, 32);
+    c.name = name;
+    c.lastAdvert = getU32(f.data() + 132);
+    if (f.size() >= 144) {
+        c.lat = (int32_t)getU32(f.data() + 136);
+        c.lon = (int32_t)getU32(f.data() + 140);
+    }
+    c.lastMod = f.size() >= 148 ? getU32(f.data() + 144) : (uint32_t)time(nullptr);
+    std::string key = toLower(bytesToHex(c.pubKey));
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        auto it = contacts_.find(key);
+        if (it != contacts_.end()) c.secretHex = it->second.secretHex;
+        contacts_[key] = c;
+        persistContacts();
+    }
+    send({RESP_OK});
+    fprintf(stderr, "[node] contact upsert: %s\n", c.name.c_str());
 }
 
 // [3][txt_type][channel_idx][timestamp4][text...]\0 -> encrypt, transmit,
@@ -470,6 +602,97 @@ void Node::onRxPacket(const RxPacket& pkt) {
         fprintf(stderr, "[node] advert: %s (%s, snr %.1f)\n", c.name.c_str(),
                 a->publicKey.substr(0, 12).c_str(), pkt.snr);
     }
-    // Other payload types (acks, paths, traces, direct messages) are not for
-    // a v1 channel-chat node; they are heard and ignored.
+    else if (decoded.payloadType == PayloadType::TextMessage) {
+        auto payload = hexToBytes(decoded.payloadRaw);
+        auto myPub = hexToBytes(id_.publicKeyHex);
+        if (payload.size() < 20 || payload[0] != myPub[0]) return; // not for us
+        uint8_t srcHash = payload[1];
+
+        std::optional<PeerCrypto::DecryptedTextMessage> msg;
+        std::string senderPubHex, senderName;
+        std::vector<uint8_t> senderPub;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            for (auto& [k, c] : contacts_) {
+                if (c.pubKey[0] != srcHash) continue;
+                msg = PeerCrypto::decryptTextMessage(contactSecret(c),
+                                                     payload.data(), payload.size());
+                if (msg) {
+                    senderPubHex = k;
+                    senderName = c.name;
+                    senderPub = c.pubKey;
+                    c.lastMod = (uint32_t)time(nullptr);
+                    break;
+                }
+            }
+        }
+        if (!msg || msg->txtType != 0) return;
+
+        // Deliver as RESP_CONTACT_MSG_RECV_V3:
+        // [16][snr i8 x4][res][res][prefix6][path_len][txt_type][ts4][text\0]
+        int snr4 = (int)lrintf(pkt.snr * 4.0f);
+        std::vector<uint8_t> f{RESP_CONTACT_MSG_RECV_V3,
+                               (uint8_t)(int8_t)std::max(-128, std::min(127, snr4)), 0, 0};
+        f.insert(f.end(), senderPub.begin(), senderPub.begin() + 6);
+        f.push_back(decoded.pathLength);
+        f.push_back(0);   // txt_type plain
+        putU32(f, msg->timestamp);
+        f.insert(f.end(), msg->text.begin(), msg->text.end());
+        f.push_back(0);
+        if (f.size() > 172) f.resize(172);
+        queueForApp(std::move(f));
+
+        // Auto-ACK, as firmware does: hash of the plaintext + SENDER pubkey,
+        // plus an attempt echo and a random byte so the packet hash is unique
+        uint32_t ack = PeerCrypto::calcAckHash(msg->timestamp, msg->attempt,
+                                               msg->text, senderPubHex);
+        std::vector<uint8_t> ackPayload;
+        putU32(ackPayload, ack);
+        ackPayload.push_back(msg->attempt);
+        ackPayload.push_back((uint8_t)(rand() & 0xFF));
+        auto ackPkt = MeshCorePacketEncoder::buildPacket(RouteType::Flood,
+                                                         PayloadType::Ack, ackPayload);
+        if (ackPkt.success) {
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                seen_[toLower(bytesToHex(ackPayload))] = pkt.time;
+            }
+            enqueueTx(toLower(bytesToHex(ackPkt.bytes)));
+        }
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            persistContacts();
+        }
+        fprintf(stderr, "[node] direct msg from %s (snr %.1f), acked\n",
+                senderName.c_str(), pkt.snr);
+    } else if (decoded.payloadType == PayloadType::Ack) {
+        auto payload = hexToBytes(decoded.payloadRaw);
+        if (payload.size() < 4) return;
+        uint32_t ack = getU32(payload.data());
+        AppSender sender;
+        bool matched = false;
+        double sentAt = 0;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            for (auto it = pendingAcks_.begin(); it != pendingAcks_.end(); ++it) {
+                if (it->ack == ack) {
+                    matched = true;
+                    sentAt = it->sentAt;
+                    pendingAcks_.erase(it);
+                    break;
+                }
+            }
+            sender = appSender_;
+        }
+        if (matched) {
+            // PUSH_SEND_CONFIRMED: [0x82][ack4][trip_ms4]
+            std::vector<uint8_t> p{0x82};
+            putU32(p, ack);
+            putU32(p, (uint32_t)std::max(0.0, (pkt.time - sentAt) * 1000.0));
+            if (sender) sender(p);
+            fprintf(stderr, "[node] delivery ACK received (trip %.1f s)\n",
+                    pkt.time - sentAt);
+        }
+    }
+    // Paths and traces are not handled yet; they are heard and ignored.
 }

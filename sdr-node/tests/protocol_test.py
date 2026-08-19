@@ -23,9 +23,24 @@ def check(cond, what):
     if not cond:
         fails.append(what)
 
+# --- Fixed node identity (so the incoming DM can be pre-encrypted for it) ---
+NODE_SEED = "4444444444444444444444444444444444444444444444444444444444444444"
+node_pub = None
+if DECODER_CLI:
+    out = subprocess.run([DECODER_CLI, "derive-key", NODE_SEED + NODE_SEED],
+                         capture_output=True, text=True).stdout
+    import re as _re
+    for ln in out.splitlines():
+        ln = _re.sub(r"\x1b\[[0-9;]*m", "", ln).strip()
+        if _re.fullmatch(r"[0-9A-Fa-f]{64}", ln):
+            node_pub = ln.lower()   # the standalone 64-hex line is the pubkey
+with open(os.path.join(td, "identity.key"), "w") as f:
+    f.write(NODE_SEED + (node_pub or NODE_SEED) + "\n")
+
 # --- Test packets from the real encoder ---
 packets = {}
-for line in subprocess.run([PACKETGEN], capture_output=True, text=True).stdout.splitlines():
+gen_args = [PACKETGEN] + ([node_pub] if node_pub else [])
+for line in subprocess.run(gen_args, capture_output=True, text=True).stdout.splitlines():
     k, v = line.split()
     packets[k] = v.lower()
 
@@ -39,7 +54,7 @@ with open(rx_log, "w") as f:
 
 fake_rx = os.path.join(td, "fake_lora_rx")
 with open(fake_rx, "w") as f:
-    f.write(f"#!/bin/sh\n# ignore args; replay after a short delay, then stay alive\nsleep 2\ncat {rx_log}\nsleep 600\n")
+    f.write(f"#!/bin/sh\n# ignore args; follow the feed so the test can inject packets mid-run\nsleep 2\ntail -f {rx_log}\n")
 fake_tx = os.path.join(td, "fake_lora_tx")
 tx_record = os.path.join(td, "tx_record.txt")
 with open(fake_tx, "w") as f:
@@ -54,6 +69,7 @@ with open(conf, "w") as f:
 port = {PORT}
 identity_file = {td}/identity.key
 channels_file = {td}/channels.txt
+contacts_file = {td}/contacts.txt
 rx_binary = {fake_rx}
 tx_binary = {fake_tx}
 rx_channels = 869618000
@@ -63,8 +79,14 @@ tx_sf = 7
 """)
 with open(os.path.join(td, "channels.txt"), "w") as f:
     f.write(f"Public,{PUB_KEY}\n")
+if "PEERPUB" in packets:
+    with open(os.path.join(td, "contacts.txt"), "w") as f:
+        f.write(f"{packets['PEERPUB']}\t1\t1787090000\t1787090000\t0\t0\tTestPeer DM\n")
 
-daemon = subprocess.Popen([NODE, "-c", conf], stderr=subprocess.PIPE, text=True)
+daemon = subprocess.Popen([NODE, "-c", conf], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL)
+import atexit
+atexit.register(daemon.kill)
 time.sleep(0.7)
 
 def frame(payload: bytes) -> bytes:
@@ -161,13 +183,15 @@ check(r[0] == 10, "NO_MORE_MESSAGES after queue drained")
 c.send(bytes([4]))
 r = recv_resp()
 check(r[0] == 2, "CONTACTS_START")
-r = recv_resp()
-check(r[0] == 3 and len(r) == 148, "one 148-byte contact frame")
-if len(r) == 148:
-    cname = r[100:132].split(b"\x00")[0].decode()
-    check(cname == "FakeNode", f"contact from advert: '{cname}'")
-r = recv_resp()
-check(r[0] == 4, "END_OF_CONTACTS")
+contact_names = []
+while True:
+    r = recv_resp()
+    if r[0] == 4:
+        break
+    check(r[0] == 3 and len(r) == 148, "contact frame is 148 bytes")
+    contact_names.append(r[100:132].split(b"\x00")[0].decode())
+expected = {"FakeNode"} | ({"TestPeer DM"} if "PEERPUB" in packets else set())
+check(set(contact_names) == expected, f"contacts synced: {sorted(contact_names)}")
 
 # 5b. Rename with a trailing NUL, as the official app sends it; the NUL must
 # not survive into the name (it would truncate every on-air message)
@@ -191,6 +215,84 @@ if sent_hex and DECODER_CLI:
                          capture_output=True, text=True).stdout
     check("ahoj z testu" in out, "transmitted packet decrypts to the sent text")
     check("NulName" in out, "on-air message carries the (renamed) node name prefix")
+
+# 6b. Direct message flow (only when the decoder CLI gave us the node pubkey)
+if "DM" in packets:
+    with open(rx_log, "a") as f:
+        f.write(f"rx cfg: freq=869618000 sf=7 bw=62500 snr=3.0 cfo=0.00 time={time.time():.3f}\n")
+        f.write(f"rx ok: {packets['DM']}\n")
+    # incoming DM -> MSG_WAITING push -> pull -> code 16 frame
+    got_dm = None
+    deadline = time.time() + 6
+    while time.time() < deadline and got_dm is None:
+        try:
+            p = c.recv(1.0)
+        except socket.timeout:
+            c.send(bytes([10]))
+            continue
+        if p and p[0] >= 0x80:
+            pushes.append(p)
+            if p[0] == 0x83:
+                c.send(bytes([10]))
+        elif p and p[0] == 16:
+            got_dm = p
+        elif p and p[0] == 10:
+            pass
+    check(got_dm is not None, "incoming DM delivered as code-16 frame")
+    if got_dm:
+        prefix = got_dm[4:10].hex()
+        check(prefix == packets["PEERPUB"][:12], "DM sender prefix matches peer")
+        text = got_dm[16:].split(b"\x00")[0].decode()
+        check(text == "sukromny pozdrav", f"DM text '{text}'")
+    time.sleep(0.8)
+    ack_tx = None
+    with open(tx_record) as f:
+        for line in f:
+            args2 = line.split()
+            if "-x" in args2:
+                hx = args2[args2.index("-x") + 1]
+                b = bytes.fromhex(hx)
+                if (b[0] >> 2) & 0x0F == 0x03:
+                    ack_tx = b
+    check(ack_tx is not None, "auto-ACK was transmitted for the incoming DM")
+
+    # outgoing DM: [2][type][attempt][ts4][prefix6][text]
+    c.send(bytes([2, 0, 0]) + struct.pack("<I", int(time.time())) +
+           bytes.fromhex(packets["PEERPUB"][:12]) + b"odpoved\x00")
+    r = recv_resp()
+    check(r[0] == 6 and len(r) >= 10, "RESP_SENT for direct send")
+    sent_ack = struct.unpack_from("<I", r, 2)[0] if len(r) >= 10 else 0
+    check(sent_ack != 0, "expected ack hash is nonzero")
+    time.sleep(0.8)
+    dm_tx = None
+    with open(tx_record) as f:
+        for line in f:
+            args2 = line.split()
+            if "-x" in args2:
+                hx = args2[args2.index("-x") + 1]
+                b = bytes.fromhex(hx)
+                if (b[0] >> 2) & 0x0F == 0x02:
+                    dm_tx = b
+    check(dm_tx is not None, "outgoing DM packet was transmitted")
+    if dm_tx:
+        check(dm_tx[2] == bytes.fromhex(packets["PEERPUB"])[0], "DM dest hash = peer")
+    # inject the delivery ACK -> PUSH_SEND_CONFIRMED with the same hash
+    ack_pkt = bytes([0x0D, 0x00]) + struct.pack("<I", sent_ack) + b"\x00\x42"
+    with open(rx_log, "a") as f:
+        f.write(f"rx cfg: freq=869618000 sf=7 bw=62500 snr=1.0 cfo=0.00 time={time.time():.3f}\n")
+        f.write(f"rx ok: {ack_pkt.hex()}\n")
+    got_confirm = False
+    deadline = time.time() + 5
+    while time.time() < deadline and not got_confirm:
+        try:
+            p = c.recv(1.0)
+        except socket.timeout:
+            continue
+        if p and p[0] == 0x82 and struct.unpack_from("<I", p, 1)[0] == sent_ack:
+            got_confirm = True
+        elif p and p[0] >= 0x80:
+            pushes.append(p)
+    check(got_confirm, "PUSH_SEND_CONFIRMED with matching ack hash")
 
 # 7. Unknown command -> RESP_ERR, daemon stays alive
 c.send(bytes([99]))

@@ -21,6 +21,7 @@ struct NodeConfig {
     std::string name = "SDR Node";
     std::string identity_file = "identity.key";
     std::string channels_file = "channels.txt";
+    std::string contacts_file = "contacts.txt";
     std::optional<double> lat, lon;
 
     // TCP server
