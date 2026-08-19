@@ -21,10 +21,16 @@ LoRa modulation/demodulation is
 `lora_rx`/`lora_tx`, run as child processes so a receiver crash never takes
 the node down.
 
-**V1 scope:** channel (group) chat in both directions, self adverts, and
-contacts learned from heard adverts. Direct (private) messages need X25519
-contact crypto that meshcore-cpp-decoder does not have yet; the daemon
-answers those with "unsupported" so the app shows a clean failure.
+**Implemented:** channel (group) chat both directions; direct (private)
+messages with end-to-end ECDH encryption, automatic ACKs and delivery
+confirmations; directed routing (paths learned from PATH returns, DMs go
+direct once a route is known, flood otherwise); contacts from adverts,
+persisted; periodic + manual self adverts; radio/core stats; live radio
+retune from the app. Works with both meshcore-open and the official app
+(every reply byte-verified against the real firmware source).
+
+**Not yet:** repeater administration (login/status/CLI), trace paths,
+GRP_DATA blobs (image transfer), acting as a repeater (deliberately).
 
 ## Build
 
@@ -50,6 +56,15 @@ cp sdr-node.conf.example sdr-node.conf   # edit: radio devices, ppm, name
   and the app can add/edit channels, which persist back to the file.
   Keep this file out of git.
 - In the app: **Connect via TCP** → host = the daemon machine, port 5000.
+
+## Running as a service
+
+The macmini deployment runs under systemd (`/etc/systemd/system/
+meshcore-sdr-node.service`, Restart=always, logs appended to
+`~/sdr-node.log`) so the node survives crashes and reboots; the laptop
+reaches it through a LaunchAgent-managed ssh tunnel
+(`~/Library/LaunchAgents/net.mmm.sdr-tunnel.plist`, local port 5001 -
+macOS AirPlay squats on 5000).
 
 ## Notes and limits
 
