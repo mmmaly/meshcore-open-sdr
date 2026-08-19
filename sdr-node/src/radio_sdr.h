@@ -12,6 +12,7 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <vector>
 #include <sys/types.h>
 
 struct RxPacket {
@@ -71,7 +72,9 @@ public:
     RadioConfig& config() { return cfg_; }
 
 private:
-    void readerLoop(int fd);
+    void superviseLoop();
+    void readPipe(int fd);
+    std::vector<std::string> rxArgv() const;
 
     RadioConfig cfg_;
     PacketHandler handler_;
