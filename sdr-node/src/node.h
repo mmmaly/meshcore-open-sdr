@@ -79,6 +79,10 @@ struct Contact {
     uint32_t lastMod = 0;
     int32_t lat = 0, lon = 0;      // x1e6, 0 = unknown
     std::string secretHex;         // cached ECDH shared secret (lazy)
+    // Path the last advert arrived over (raw packed len byte + path bytes)
+    uint8_t advPathLen = 0xFF;
+    std::vector<uint8_t> advPath;
+    uint32_t advRecvTime = 0;
 };
 
 // A sent direct message whose delivery ACK we are waiting for

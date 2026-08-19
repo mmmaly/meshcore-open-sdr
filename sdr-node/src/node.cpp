@@ -172,6 +172,7 @@ std::vector<uint8_t> Node::buildContactFrame(const Contact& c, uint8_t code) {
 
 void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
     if (f.empty()) return;
+    fprintf(stderr, "[node] cmd 0x%02X (%zu B)\n", f[0], f.size());
     switch (f[0]) {
     case CMD_DEVICE_QUERY:
         send(buildDeviceInfo());
@@ -333,6 +334,22 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
     case 9 /*CMD_ADD_UPDATE_CONTACT*/:
         handleAddUpdateContact(f, send);
         break;
+    case 42 /*CMD_GET_ADVERT_PATH*/: {
+        if (f.size() < 34) { send({RESP_ERR, 6}); break; }
+        std::lock_guard<std::mutex> lk(mtx_);
+        auto it = contacts_.find(toLower(bytesToHex(f.data() + 2, 32)));
+        if (it == contacts_.end() || it->second.advPathLen == 0xFF) {
+            send({RESP_ERR, 2});   // firmware answers not-found without a record
+            break;
+        }
+        // RESP_CODE_ADVERT_PATH: [22][recv_timestamp4][path_len][path...]
+        std::vector<uint8_t> r{22};
+        putU32(r, it->second.advRecvTime);
+        r.push_back(it->second.advPathLen);
+        r.insert(r.end(), it->second.advPath.begin(), it->second.advPath.end());
+        send(r);
+        break;
+    }
     case 30 /*CMD_GET_CONTACT_BY_KEY*/: {
         if (f.size() < 33) { send({RESP_ERR, 6}); break; }
         std::lock_guard<std::mutex> lk(mtx_);
@@ -586,6 +603,21 @@ void Node::onRxPacket(const RxPacket& pkt) {
         Contact c;
         c.pubKey = hexToBytes(a->publicKey);
         c.type = (uint8_t)a->appData.deviceRole;
+        c.advRecvTime = (uint32_t)pkt.time;
+        if (decoded.path) {
+            std::vector<uint8_t> pathBytes;
+            size_t hashSize = 1;
+            for (const auto& hh : *decoded.path) {
+                hashSize = hh.size() / 2;
+                auto hb = hexToBytes(hh);
+                pathBytes.insert(pathBytes.end(), hb.begin(), hb.end());
+            }
+            c.advPath = pathBytes;
+            c.advPathLen = (uint8_t)((decoded.pathLength & 63) |
+                                     (((hashSize - 1) & 3) << 6));
+        } else {
+            c.advPathLen = 0;   // zero-hop: heard directly
+        }
         c.name = a->appData.name.value_or(a->publicKey.substr(0, 8));
         c.lastAdvert = a->timestamp;
         c.lastMod = (uint32_t)time(nullptr);
