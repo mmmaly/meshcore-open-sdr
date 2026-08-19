@@ -4,6 +4,7 @@
 #include <cstring>
 #include <ctime>
 #include <algorithm>
+#include <cmath>
 #include <sys/stat.h>
 
 #include "meshcore/meshcore.h"
@@ -32,7 +33,17 @@ Node::Node(const NodeConfig& cfg, const NodeIdentity& id, SdrRadio& radio)
     loadContactsFile();
     fprintf(stderr, "[node] %s, pubkey %.16s..., %zu channel(s), %zu contact(s)\n",
             cfg_.name.c_str(), id_.publicKeyHex.c_str(), channels_.size(), contacts_.size());
+    startTime_ = time(nullptr);
     txThread_ = std::thread(&Node::txWorker, this);
+}
+
+// Semtech airtime formula, approximated: good enough for stats display
+double Node::estimateAirtime(size_t bytes) const {
+    double tsym = (double)(1u << cfg_.tx_sf) / cfg_.bw;
+    double nsym = 12.25 + 8.0 +
+        std::max(0.0, std::ceil((8.0 * bytes - 4.0 * cfg_.tx_sf + 44.0) /
+                                (4.0 * cfg_.tx_sf)) * (cfg_.tx_cr + 4));
+    return nsym * tsym;
 }
 
 Node::~Node() {
@@ -47,6 +58,7 @@ Node::~Node() {
 void Node::enqueueTx(std::string hex) {
     {
         std::lock_guard<std::mutex> lk(mtx_);
+        txAirSecs_ += estimateAirtime(hex.size() / 2);
         txQueue_.push_back(std::move(hex));
     }
     txCv_.notify_one();
@@ -152,7 +164,7 @@ std::vector<uint8_t> Node::buildSelfInfo() {
 std::vector<uint8_t> Node::buildDeviceInfo() {
     std::vector<uint8_t> f(82, 0);
     f[0] = RESP_DEVICE_INFO;
-    f[1] = 7;                       // firmware ver code: pre-stats featureset
+    f[1] = 8;                       // firmware ver code: stats supported
     f[2] = 100;                     // -> 200 max contacts
     f[3] = MAX_CHANNELS;
     strncpy((char*)f.data() + 8, __DATE__, 11);
@@ -258,9 +270,14 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
             rc.tx_cr = f[10] >= 5 ? f[10] - 4 : f[10];
             cfg_.tx_freq = rc.tx_freq; cfg_.bw = rc.bw;
             cfg_.tx_sf = rc.tx_sf; cfg_.tx_cr = rc.tx_cr;
-            fprintf(stderr, "[node] radio params: %u Hz bw %u sf %d cr %d "
-                    "(applied to TX; restart daemon to retune RX)\n",
-                    rc.tx_freq, rc.bw, rc.tx_sf, rc.tx_cr);
+            std::string freqStr = std::to_string(rc.tx_freq);
+            bool watched = rc.rx_channels.find(freqStr) != std::string::npos;
+            if (!watched)
+                rc.rx_channels += (rc.rx_channels.empty() ? "" : ",") + freqStr;
+            fprintf(stderr, "[node] radio params: %u Hz bw %u sf %d cr %d%s\n",
+                    rc.tx_freq, rc.bw, rc.tx_sf, rc.tx_cr,
+                    watched ? "" : " (rx restarting to watch new freq)");
+            if (!watched) radio_.restartRx();
         }
         send({RESP_OK});
         break;
@@ -270,6 +287,32 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
     case CMD_SET_FLOOD_SCOPE:
         send({RESP_OK});           // scoping not implemented; ack so sends proceed
         break;
+    case CMD_GET_STATS: {
+        uint8_t sub = f.size() > 1 ? f[1] : 1;
+        std::vector<uint8_t> r{24 /*RESP_CODE_STATS*/, sub};
+        if (sub == 0) {            // core: batt, uptime, err flags, queue len
+            r.push_back(4200 & 0xFF); r.push_back(4200 >> 8);
+            putU32(r, (uint32_t)(time(nullptr) - startTime_));
+            r.push_back(0); r.push_back(0);
+            std::lock_guard<std::mutex> lk(mtx_);
+            r.push_back((uint8_t)std::min<size_t>(255, txQueue_.size()));
+        } else if (sub == 1) {     // radio: noise floor, rssi, snr, airtime
+            int16_t noise = -105;  // typical urban 868 floor; not measured
+            r.push_back(noise & 0xFF); r.push_back((noise >> 8) & 0xFF);
+            int rssi = (int)(-105 + lastSnr_);
+            r.push_back((uint8_t)(int8_t)std::max(-128, std::min(127, rssi)));
+            int snr4 = (int)lrintf(lastSnr_ * 4.0f);
+            r.push_back((uint8_t)(int8_t)std::max(-128, std::min(127, snr4)));
+            std::lock_guard<std::mutex> lk(mtx_);
+            putU32(r, (uint32_t)txAirSecs_);
+            putU32(r, (uint32_t)rxAirSecs_);
+        } else {
+            send({RESP_ERR, 1});
+            break;
+        }
+        send(r);
+        break;
+    }
     case CMD_GET_CHANNEL: {
         uint8_t idx = f.size() > 1 ? f[1] : 0;
         if (idx >= MAX_CHANNELS) {
@@ -597,6 +640,10 @@ void Node::queueForApp(std::vector<uint8_t> frame) {
 
 void Node::onRxPacket(const RxPacket& pkt) {
     lastSnr_ = pkt.snr;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        rxAirSecs_ += estimateAirtime(pkt.hex.size() / 2);
+    }
     auto decoded = MeshCorePacketDecoder::decode(pkt.hex);
     if (!decoded.isValid && decoded.payloadRaw.empty()) return;
 

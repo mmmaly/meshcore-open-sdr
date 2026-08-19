@@ -26,6 +26,7 @@ struct NodeConfig {
 
     // TCP server
     int port = 5000;
+    int advert_interval_min = 240;   // periodic flood advert; 0 = off
 
     // Radio (mirrors RadioConfig; parsed into it by main)
     std::string rx_binary = "lora_rx";

@@ -124,6 +124,8 @@ public:
     void setAppSender(AppSender sender);
 
     void sendSelfAdvert(bool flood);
+    // Rough LoRa airtime for a packet of n bytes at the current TX params
+    double estimateAirtime(size_t bytes) const;
     ~Node();
 
 private:
@@ -157,6 +159,8 @@ private:
     std::deque<PendingAck> pendingAcks_;
     AppSender appSender_;
     float lastSnr_ = 0.0f;
+    double txAirSecs_ = 0.0, rxAirSecs_ = 0.0;
+    time_t startTime_ = 0;
 
     std::thread txThread_;
     std::condition_variable txCv_;

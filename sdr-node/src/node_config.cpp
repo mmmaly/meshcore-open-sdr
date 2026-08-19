@@ -38,6 +38,7 @@ NodeConfig NodeConfig::load(const std::string& path, std::string& err) {
         else if (k == "lat") c.lat = atof(v.c_str());
         else if (k == "lon") c.lon = atof(v.c_str());
         else if (k == "port") c.port = atoi(v.c_str());
+        else if (k == "advert_interval_min") c.advert_interval_min = atoi(v.c_str());
         else if (k == "rx_binary") c.rx_binary = v;
         else if (k == "tx_binary") c.tx_binary = v;
         else if (k == "rx_device") c.rx_device = v;

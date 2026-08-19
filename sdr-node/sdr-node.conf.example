@@ -3,6 +3,8 @@
 
 name = SDR Node
 port = 5000
+# Flood a self-advert every N minutes (0 = only manual/-a)
+advert_interval_min = 240
 # lat = 48.1486
 # lon = 17.1077
 

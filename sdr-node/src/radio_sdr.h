@@ -58,6 +58,10 @@ public:
     bool start(PacketHandler handler);
     void stop();
 
+    // Kill the current lora_rx; the supervisor respawns it with the current
+    // config (used after live radio-param changes)
+    void restartRx();
+
     // Blocking transmit of one raw packet (hex). Runs lora_tx to completion;
     // returns false if the child failed. Estimated airtime is reported so the
     // caller can honor MeshCore timing if it wants.

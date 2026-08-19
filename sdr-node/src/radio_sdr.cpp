@@ -88,6 +88,10 @@ void SdrRadio::superviseLoop() {
     }
 }
 
+void SdrRadio::restartRx() {
+    if (rx_pid_ > 0) kill(rx_pid_, SIGTERM);
+}
+
 void SdrRadio::stop() {
     if (!running_) return;
     running_ = false;
