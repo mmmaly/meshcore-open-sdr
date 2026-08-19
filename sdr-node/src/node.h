@@ -179,6 +179,7 @@ private:
     std::map<std::string, double> seen_;            // payload hash -> time
     std::deque<PendingAck> pendingAcks_;
     std::deque<PendingReq> pendingReqs_;
+    std::map<uint32_t, double> sentTraces_;   // tag -> time, for progress logs
     AppSender appSender_;
     float lastSnr_ = 0.0f;
     double txAirSecs_ = 0.0, rxAirSecs_ = 0.0;

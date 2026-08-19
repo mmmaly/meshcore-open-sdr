@@ -200,7 +200,11 @@ std::vector<uint8_t> Node::buildDeviceInfo() {
     const char* manu = "MeshCore SDR (RTL-SDR rx, HackRF tx)";
     strncpy((char*)f.data() + 20, manu, 39);
     strncpy((char*)f.data() + 60, "sdr-node 0.1", 19);
-    f[81] = 0;                      // client_repeat
+    f[80] = 0;                      // client_repeat
+    // path_hash_mode: width = mode + 1. This mesh is predominantly 2-byte
+    // (measured ~69% of received packets), and traces that work use 2-byte
+    // hashes, so tell the app to build paths the same way.
+    f[81] = 1;
     return f;
 }
 
@@ -457,6 +461,11 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
         if (!pkt.success) { send({RESP_ERR, 4}); break; }
         enqueueTx(toLower(bytesToHex(pkt.bytes)));
         uint32_t tag = getU32(f.data() + 1);
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            sentTraces_[tag] = (double)time(nullptr);
+            if (sentTraces_.size() > 32) sentTraces_.erase(sentTraces_.begin());
+        }
         // SENT: [6][reserved][tag4][est_timeout4] - the app matches the tag
         std::vector<uint8_t> r{RESP_SENT, 0};
         putU32(r, tag);
@@ -1129,7 +1138,30 @@ void Node::onRxPacket(const RxPacket& pkt) {
         size_t hashBytes = payload.size() - 9;
         // Accumulated SNRs live in the packet path, one byte per hop
         size_t hops = decoded.pathLength;
-        if ((hops << pathSz) < hashBytes) return;   // still en route, not ours
+        uint32_t traceTag = getU32(payload.data());
+        if ((hops << pathSz) < hashBytes) {
+            // Still travelling. If it is one of ours, report how far it got:
+            // a trace that never completes otherwise looks like pure silence.
+            bool ours = false;
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                ours = sentTraces_.count(traceTag) > 0;
+            }
+            if (ours) {
+                std::string snrList;
+                if (decoded.path)
+                    for (const auto& hh : *decoded.path) {
+                        int8_t v = (int8_t)hexToBytes(hh)[0];
+                        snrList += (snrList.empty() ? "" : ", ") +
+                                   std::to_string(v / 4.0).substr(0, 5) + " dB";
+                    }
+                size_t total = hashBytes >> pathSz;
+                fprintf(stderr, "[node] trace %08X progress: hop %zu of %zu "
+                        "(hop SNRs: %s)\n", traceTag, hops, total,
+                        snrList.empty() ? "-" : snrList.c_str());
+            }
+            return;
+        }
 
         std::vector<uint8_t> snrs;
         if (decoded.path)
@@ -1154,8 +1186,12 @@ void Node::onRxPacket(const RxPacket& pkt) {
             sender = appSender_;
         }
         if (sender) sender(p);
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            sentTraces_.erase(traceTag);
+        }
         fprintf(stderr, "[node] trace returned, tag %08X, %zu hop(s), final snr %.1f\n",
-                getU32(payload.data()), hops, pkt.snr);
+                traceTag, hops, pkt.snr);
     } else if (decoded.payloadType == PayloadType::Response) {
         auto payload = hexToBytes(decoded.payloadRaw);
         auto myPub = hexToBytes(id_.publicKeyHex);
