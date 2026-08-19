@@ -474,6 +474,59 @@ if "DM" in packets:
     if got_cli:
         check(got_cli[16:].split(b"\x00")[0] == b"uptime 1234s", "CLI reply text")
 
+# 6e. Trace path: request a two-hop trace, then inject the returning packet
+# (same payload, SNR bytes accumulated in the packet path) and check the push.
+trace_tag = 0x11223344
+c.send(bytes([36]) + struct.pack("<I", trace_tag) + struct.pack("<I", 0) +
+       bytes([0]) + bytes([0xAA, 0xBB]))
+r = recv_resp()
+check(r[0] == 6 and struct.unpack_from("<I", r, 2)[0] == trace_tag,
+      "trace SENT echoes the tag")
+time.sleep(0.6)
+trace_tx = None
+with open(tx_record) as f:
+    for line in f:
+        a2 = line.split()
+        if "-x" in a2:
+            b = bytes.fromhex(a2[a2.index("-x") + 1])
+            if (b[0] >> 2) & 0x0F == 0x09:
+                trace_tx = b
+check(trace_tx is not None, "trace radiated as a TRACE packet")
+if trace_tx:
+    check((trace_tx[0] & 3) == 2, "trace is direct-routed")
+    check(trace_tx[1] == 0, "trace leaves with an empty path (SNRs accumulate)")
+    check(trace_tx[2:10] == struct.pack("<I", trace_tag) + struct.pack("<I", 0),
+          "trace payload carries tag and auth")
+    check(trace_tx[11:13] == bytes([0xAA, 0xBB]), "trace payload carries the route")
+
+# The returning trace: same payload, two SNR bytes in the packet path
+ret = bytes([0x09 << 2 | 0x02, 0x02, 20, 12]) + \
+      struct.pack("<I", trace_tag) + struct.pack("<I", 0) + \
+      bytes([0, 0xAA, 0xBB])
+with open(rx_log, "a") as f:
+    f.write(f"rx cfg: freq=869618000 sf=7 bw=62500 snr=2.5 cfo=0.00 time={time.time():.3f}\n")
+    f.write(f"rx ok: {ret.hex()}\n")
+got_trace = None
+deadline = time.time() + 6
+while time.time() < deadline and got_trace is None:
+    try:
+        p = c.recv(1.0)
+    except socket.timeout:
+        continue
+    if p and p[0] == 0x89:
+        got_trace = p
+    elif p and p[0] >= 0x80:
+        pushes.append(p)
+check(got_trace is not None, "PUSH_TRACE_DATA received for the returning trace")
+if got_trace:
+    check(struct.unpack_from("<I", got_trace, 4)[0] == trace_tag,
+          "trace push echoes the tag at offset 4")
+    check(got_trace[2] == 2, "trace push reports 2 route hash bytes")
+    # firmware layout: [code][res][path_len][flags][tag4][auth4][hashes][snrs][final]
+    check(got_trace[12:14] == bytes([0xAA, 0xBB]), "trace push carries route hashes")
+    check(got_trace[14:16] == bytes([20, 12]), "trace push carries per-hop SNRs")
+    check(got_trace[16] == 10, "trace push ends with the final SNR (2.5 dB x4)")
+
 # 7. Unknown command -> RESP_ERR, daemon stays alive
 c.send(bytes([99]))
 r = recv_resp()

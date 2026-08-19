@@ -411,6 +411,32 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
     case CMD_SEND_TXT_MSG:
         handleSendDirectText(f, send);
         break;
+    case CMD_SEND_TRACE_PATH: {
+        if (f.size() < 10) { send({RESP_ERR, 6}); break; }
+        uint8_t flags = f[9];
+        uint8_t pathSz = (uint8_t)(1 << (flags & 3));
+        size_t pathBytes = f.size() - 10;
+        if (pathBytes % pathSz != 0 || pathBytes / pathSz > 63) {
+            send({RESP_ERR, 6});
+            break;
+        }
+        std::vector<uint8_t> payload(f.begin() + 1, f.begin() + 9);  // tag+auth
+        payload.push_back(flags);
+        payload.insert(payload.end(), f.begin() + 10, f.end());      // route hashes
+        auto pkt = MeshCorePacketEncoder::buildPacket(RouteType::Direct,
+                                                      PayloadType::Trace, payload);
+        if (!pkt.success) { send({RESP_ERR, 4}); break; }
+        enqueueTx(toLower(bytesToHex(pkt.bytes)));
+        uint32_t tag = getU32(f.data() + 1);
+        // SENT: [6][reserved][tag4][est_timeout4] - the app matches the tag
+        std::vector<uint8_t> r{RESP_SENT, 0};
+        putU32(r, tag);
+        putU32(r, (uint32_t)(4000 + 2000 * (pathBytes / pathSz)));
+        send(r);
+        fprintf(stderr, "[node] trace sent, tag %08X, %zu hop(s)\n",
+                tag, pathBytes / pathSz);
+        break;
+    }
     case CMD_SEND_LOGIN:
         handleRepeaterRequest(f, send, PendingReq::Login);
         break;
@@ -859,6 +885,8 @@ void Node::onRxPacket(const RxPacket& pkt) {
     if (!decoded.isValid && decoded.payloadRaw.empty()) return;
 
     std::string payloadHex = toLower(decoded.payloadRaw);
+    if (decoded.payloadType == PayloadType::Trace && decoded.path)
+        for (const auto& hh : *decoded.path) payloadHex += toLower(hh);
     {
         std::lock_guard<std::mutex> lk(mtx_);
         if (seenBefore(payloadHex, pkt.time)) {
@@ -1060,6 +1088,41 @@ void Node::onRxPacket(const RxPacket& pkt) {
         }
         fprintf(stderr, "[node] direct msg from %s (snr %.1f), acked\n",
                 senderName.c_str(), pkt.snr);
+    } else if (decoded.payloadType == PayloadType::Trace) {
+        auto payload = hexToBytes(decoded.payloadRaw);
+        if (payload.size() < 9) return;
+        uint8_t flags = payload[8];
+        uint8_t pathSz = flags & 3;
+        size_t hashBytes = payload.size() - 9;
+        // Accumulated SNRs live in the packet path, one byte per hop
+        size_t hops = decoded.pathLength;
+        if ((hops << pathSz) < hashBytes) return;   // still en route, not ours
+
+        std::vector<uint8_t> snrs;
+        if (decoded.path)
+            for (const auto& hh : *decoded.path) {
+                auto hb = hexToBytes(hh);
+                snrs.insert(snrs.end(), hb.begin(), hb.end());
+            }
+
+        // PUSH_TRACE_DATA: [0x89][reserved][path_len][flags][tag4][auth4]
+        //                  [hashes][snrs][final_snr]
+        std::vector<uint8_t> p{0x89, 0, (uint8_t)hashBytes, flags};
+        p.insert(p.end(), payload.begin(), payload.begin() + 8);   // tag+auth
+        p.insert(p.end(), payload.begin() + 9, payload.end());     // hashes
+        p.insert(p.end(), snrs.begin(), snrs.end());
+        int snr4 = (int)lrintf(pkt.snr * 4.0f);
+        p.push_back((uint8_t)(int8_t)std::max(-128, std::min(127, snr4)));
+        if (p.size() > 172) p.resize(172);
+
+        AppSender sender;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            sender = appSender_;
+        }
+        if (sender) sender(p);
+        fprintf(stderr, "[node] trace returned, tag %08X, %zu hop(s), final snr %.1f\n",
+                getU32(payload.data()), hops, pkt.snr);
     } else if (decoded.payloadType == PayloadType::Response) {
         auto payload = hexToBytes(decoded.payloadRaw);
         auto myPub = hexToBytes(id_.publicKeyHex);

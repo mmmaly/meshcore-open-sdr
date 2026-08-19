@@ -35,8 +35,12 @@ and the CLI console - each an encrypted request whose RESPONSE is matched
 back to the pending command, including responses that arrive folded into
 a PATH return.
 
-**Not yet:** trace paths, GRP_DATA blobs (image transfer), acting as a
-repeater (deliberately).
+Trace paths work: the app's path-trace map can probe a route and get the
+per-hop SNRs back.
+
+**Not yet:** GRP_DATA blobs (image transfer), acting as a repeater
+(deliberately - at ~25 mW it would be a weak one, and it would double the
+node's airtime).
 
 ## Build
 
