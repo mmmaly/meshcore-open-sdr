@@ -252,9 +252,9 @@ if "DM" in packets:
             if "-x" in args2:
                 hx = args2[args2.index("-x") + 1]
                 b = bytes.fromhex(hx)
-                if (b[0] >> 2) & 0x0F == 0x03:
+                if (b[0] >> 2) & 0x0F == 0x08:
                     ack_tx = b
-    check(ack_tx is not None, "auto-ACK was transmitted for the incoming DM")
+    check(ack_tx is not None, "PATH return (with ACK) transmitted for the flood DM")
 
     # outgoing DM: [2][type][attempt][ts4][prefix6][text]
     c.send(bytes([2, 0, 0]) + struct.pack("<I", int(time.time())) +
@@ -293,6 +293,61 @@ if "DM" in packets:
         elif p and p[0] >= 0x80:
             pushes.append(p)
     check(got_confirm, "PUSH_SEND_CONFIRMED with matching ack hash")
+
+# 6c. Routing: a PATH return teaches the out-path and confirms delivery
+if "DM" in packets:
+    c.send(bytes([2, 0, 0]) + struct.pack("<I", int(time.time())) +
+           bytes.fromhex(packets["PEERPUB"][:12]) + b"druha sprava\x00")
+    r = recv_resp()
+    check(r[0] == 6 and r[1] == 1, "second DM sent as flood (no path yet)")
+    ack2 = struct.unpack_from("<I", r, 2)[0]
+    out = subprocess.run(gen_args + [struct.pack("<I", ack2).hex()],
+                         capture_output=True, text=True).stdout
+    pathpkt = dict(l.split() for l in out.splitlines())["PATHPKT"].lower()
+    with open(rx_log, "a") as f:
+        f.write(f"rx cfg: freq=869618000 sf=7 bw=62500 snr=4.0 cfo=0.00 time={time.time():.3f}\n")
+        f.write(f"rx ok: {pathpkt}\n")
+    got_pathupd = got_confirm2 = False
+    deadline = time.time() + 6
+    while time.time() < deadline and not (got_pathupd and got_confirm2):
+        try:
+            p = c.recv(1.0)
+        except socket.timeout:
+            continue
+        if p and p[0] == 0x81 and p[1:33].hex() == packets["PEERPUB"]:
+            got_pathupd = True
+        elif p and p[0] == 0x82 and struct.unpack_from("<I", p, 1)[0] == ack2:
+            got_confirm2 = True
+        elif p and p[0] >= 0x80:
+            pushes.append(p)
+    check(got_pathupd, "PUSH_PATH_UPDATED after PATH return")
+    check(got_confirm2, "delivery confirmed from the ACK inside the PATH return")
+
+    # With a path learned, the next DM goes out direct-routed over it
+    c.send(bytes([2, 0, 0]) + struct.pack("<I", int(time.time())) +
+           bytes.fromhex(packets["PEERPUB"][:12]) + b"tretia sprava\x00")
+    r = recv_resp()
+    check(r[0] == 6 and r[1] == 0, "third DM reported as direct (path known)")
+    time.sleep(0.8)
+    direct_tx = None
+    with open(tx_record) as f:
+        for line in f:
+            args2 = line.split()
+            if "-x" in args2:
+                b = bytes.fromhex(args2[args2.index("-x") + 1])
+                if (b[0] >> 2) & 0x0F == 0x02 and (b[0] & 3) == 2:
+                    direct_tx = b
+    check(direct_tx is not None and direct_tx[1] == 2 and direct_tx[2:4] == b"\xaa\xbb",
+          "direct DM carries the learned path aa,bb")
+
+    # RESET_PATH falls back to flood
+    c.send(bytes([13]) + bytes.fromhex(packets["PEERPUB"]))
+    r = recv_resp()
+    check(r[0] == 0, "RESET_PATH -> OK")
+    c.send(bytes([2, 0, 0]) + struct.pack("<I", int(time.time())) +
+           bytes.fromhex(packets["PEERPUB"][:12]) + b"stvrta sprava\x00")
+    r = recv_resp()
+    check(r[0] == 6 and r[1] == 1, "post-reset DM sent as flood again")
 
 # 7. Unknown command -> RESP_ERR, daemon stays alive
 c.send(bytes([99]))

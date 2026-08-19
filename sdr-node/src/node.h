@@ -31,6 +31,7 @@ enum Cmd : uint8_t {
     CMD_SET_ADVERT_NAME = 8,
     CMD_SYNC_NEXT_MESSAGE = 10,
     CMD_SET_RADIO_PARAMS = 11,
+    CMD_RESET_PATH = 13,
     CMD_SET_RADIO_TX_POWER = 12,
     CMD_SET_ADVERT_LATLON = 14,
     CMD_REMOVE_CONTACT = 15,
@@ -83,6 +84,10 @@ struct Contact {
     uint8_t advPathLen = 0xFF;
     std::vector<uint8_t> advPath;
     uint32_t advRecvTime = 0;
+    // Outbound route to this contact, learned from their PATH returns
+    // (packed len byte, 0xFF = unknown -> flood)
+    uint8_t outPathLen = 0xFF;
+    std::vector<uint8_t> outPath;
 };
 
 // A sent direct message whose delivery ACK we are waiting for

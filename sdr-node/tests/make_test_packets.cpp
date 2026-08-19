@@ -42,8 +42,28 @@ int main(int argc, char* argv[]) {
         auto dmPkt = MeshCorePacketEncoder::buildPacket(
             RouteType::Flood, PayloadType::TextMessage, dm);
         printf("DM %s\n", bytesToHex(dmPkt.bytes).c_str());
-        // ACK the peer would compute for a message the NODE sends it is
-        // derived at runtime; the test reads it from RESP_SENT instead.
+
+        // Optional: a PATH return from the peer carrying an ACK (argv[2] =
+        // 8-hex ack value read from RESP_SENT at runtime)
+        if (argc > 2) {
+            auto ackBytes = hexToBytes(argv[2]);
+            std::vector<uint8_t> plain;
+            plain.push_back(2);            // two 1-byte hops
+            plain.push_back(0xAA);
+            plain.push_back(0xBB);
+            plain.push_back(3);            // extra type: ACK
+            plain.insert(plain.end(), ackBytes.begin(), ackBytes.end());
+            plain.push_back(0);            // attempt echo
+            plain.push_back(0x42);         // uniqueness byte
+            auto mac = PeerCrypto::encryptThenMac(secret, plain);
+            std::vector<uint8_t> payload;
+            payload.push_back(nodePubBytes[0]);
+            payload.push_back(peerPubBytes[0]);
+            payload.insert(payload.end(), mac.begin(), mac.end());
+            auto pathPkt = MeshCorePacketEncoder::buildPacket(
+                RouteType::Flood, PayloadType::Path, payload);
+            printf("PATHPKT %s\n", bytesToHex(pathPkt.bytes).c_str());
+        }
     }
     return 0;
 }
