@@ -728,6 +728,49 @@ if len(r) >= 5:
     check(abs(struct.unpack_from("<I", r, 1)[0] - int(time.time())) < 120,
           "device time is the real clock")
 
+# 6o. The path-hash width we declare on originated flood packets is what
+# every forwarder must use when appending its hash, so relayed copies of our
+# traffic carry hashes of that width.
+def last_tx(pred):
+    found = None
+    with open(tx_record) as f:
+        for line in f:
+            a2 = line.split()
+            if "-x" in a2:
+                b = bytes.fromhex(a2[a2.index("-x") + 1])
+                if pred(b):
+                    found = b
+    return found
+
+c.send(bytes([61, 0, 1])); recv_resp()            # 2-byte mode
+c.send(bytes([7, 1])); recv_resp()                # flood self-advert
+time.sleep(0.6)
+adv_tx = last_tx(lambda b: (b[0] >> 2) & 0x0F == 0x04)
+check(adv_tx is not None, "self advert radiated")
+if adv_tx:
+    check(adv_tx[1] == 0x40,
+          f"advert declares 2-byte path hashes (path_len byte 0x{adv_tx[1]:02x}, want 0x40)")
+    check((adv_tx[1] & 63) == 0, "advert leaves with an empty path")
+
+c.send(bytes([61, 0, 0])); recv_resp()            # back to 1-byte
+c.send(bytes([7, 1])); recv_resp()
+time.sleep(0.6)
+adv_tx2 = last_tx(lambda b: (b[0] >> 2) & 0x0F == 0x04)
+if adv_tx2:
+    check(adv_tx2[1] == 0x00,
+          f"mode 0 declares 1-byte hashes (path_len byte 0x{adv_tx2[1]:02x})")
+c.send(bytes([61, 0, 1])); recv_resp()            # restore
+
+# traces must keep the 1-byte encoding whatever the mode: firmware reads a
+# trace's path_len as a raw SNR count, not as a packed hash size
+c.send(bytes([36]) + struct.pack("<I", 0x5A5A5A5A) + struct.pack("<I", 0) +
+       bytes([1]) + bytes([0x70, 0x61]))
+recv_resp()
+time.sleep(0.6)
+tr_tx = last_tx(lambda b: (b[0] >> 2) & 0x0F == 0x09)
+check(tr_tx is not None and tr_tx[1] == 0x00,
+      "trace still leaves with path_len 0x00 regardless of hash mode")
+
 # 7. Unknown command -> RESP_ERR, daemon stays alive
 c.send(bytes([99]))
 r = recv_resp()

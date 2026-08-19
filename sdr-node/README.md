@@ -55,6 +55,15 @@ ways. DEVICE_INFO reports feature level 13, matching firmware v1.17.1,
 because everything that level gates is implemented. Device settings the app
 can change (path hash mode, default flood scope) persist in `prefs_file`.
 
+`path_hash_mode` is not cosmetic: the **originator** declares the path-hash
+width in the packet's `path_len` byte (upper two bits), and every forwarder
+appends its hash at that width - firmware reads
+`packet->getPathHashSize()`, not its own preference. So this setting
+decides whether relayed copies of our traffic carry 1- or 2-byte hashes.
+Traces are the one exception and always use the 1-byte encoding, because
+firmware reads a trace's `path_len` as a raw count of accumulated SNR
+bytes.
+
 **Not yet:** acting as a repeater (deliberately - at ~25 mW it would be a
 weak one, and it would double the node's airtime).
 

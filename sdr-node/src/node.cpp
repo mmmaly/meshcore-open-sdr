@@ -623,7 +623,7 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
                   PayloadType::GroupData, payload.bytes, path,
                   (uint8_t)(((pathLenByte >> 6) & 3) + 1))
             : MeshCorePacketEncoder::buildPacket(RouteType::Flood,
-                  PayloadType::GroupData, payload.bytes);
+                  PayloadType::GroupData, payload.bytes, {}, floodHashSize());
         if (!pkt.success) { send({RESP_ERR, 4}); break; }
         {
             std::lock_guard<std::mutex> lk(mtx_);
@@ -647,6 +647,10 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
         std::vector<uint8_t> payload(f.begin() + 1, f.begin() + 9);  // tag+auth
         payload.push_back(flags);
         payload.insert(payload.end(), f.begin() + 10, f.end());      // route hashes
+        // NOTE: traces deliberately keep the 1-byte encoding. Firmware reads
+        // a trace's path_len as a raw count of accumulated SNR bytes
+        // (offset = path_len << path_sz), so setting the hash-size bits here
+        // would be read as a hop count of 64 and break every trace.
         auto pkt = MeshCorePacketEncoder::buildPacket(RouteType::Direct,
                                                       PayloadType::Trace, payload);
         if (!pkt.success) { send({RESP_ERR, 4}); break; }
@@ -800,7 +804,7 @@ void Node::handleSendDirectText(const std::vector<uint8_t>& f, const AppSender& 
               PayloadType::TextMessage, payload, outPath,
               (uint8_t)(((outPathLen >> 6) & 3) + 1))
         : MeshCorePacketEncoder::buildPacket(RouteType::Flood,
-              PayloadType::TextMessage, payload);
+              PayloadType::TextMessage, payload, {}, floodHashSize());
     if (!pkt.success) { send({RESP_ERR, 4}); return; }
 
     uint32_t ack = PeerCrypto::calcAckHash(ts, attempt, text, id_.publicKeyHex);
@@ -882,7 +886,8 @@ void Node::sendContactRequest(const std::vector<uint8_t>& f, size_t keyOff,
     bool flooded;
     if (forceFlood || target.outPathLen == 0xFF) {
         auto pkt = MeshCorePacketEncoder::buildPacket(RouteType::Flood,
-                                                      PayloadType::Request, payload);
+                                                      PayloadType::Request, payload,
+                                                      {}, floodHashSize());
         if (!pkt.success) { send({RESP_ERR, 4}); return; }
         enqueueTx(toLower(bytesToHex(pkt.bytes)));
         flooded = true;
@@ -1208,7 +1213,8 @@ void Node::handleSendChannelText(const std::vector<uint8_t>& f, const AppSender&
     auto payload = MeshCorePacketEncoder::buildGroupTextPayload(keyHex, myName, text, now, 0);
     if (!payload.success) { send({RESP_ERR, 4}); return; }
     auto pkt = MeshCorePacketEncoder::buildPacket(RouteType::Flood,
-                                                  PayloadType::GroupText, payload.bytes);
+                                                  PayloadType::GroupText, payload.bytes,
+                                                  {}, floodHashSize());
     if (!pkt.success) { send({RESP_ERR, 4}); return; }
 
     std::string hex = toLower(bytesToHex(pkt.bytes));
@@ -1245,7 +1251,7 @@ void Node::sendSelfAdvert(bool flood) {
     }
     auto pkt = MeshCorePacketEncoder::buildPacket(
         flood ? RouteType::Flood : RouteType::Direct,
-        PayloadType::Advert, payload.bytes);
+        PayloadType::Advert, payload.bytes, {}, floodHashSize());
     if (!pkt.success) return;
     {
         std::lock_guard<std::mutex> lk(mtx_);
@@ -1497,11 +1503,13 @@ void Node::onRxPacket(const RxPacket& pkt) {
                 pathPayload.push_back(hexToBytes(id_.publicKeyHex)[0]);
                 pathPayload.insert(pathPayload.end(), mac.begin(), mac.end());
                 ackPkt = MeshCorePacketEncoder::buildPacket(
-                    RouteType::Flood, PayloadType::Path, pathPayload);
+                    RouteType::Flood, PayloadType::Path, pathPayload,
+                    {}, floodHashSize());
             }
         } else {
             ackPkt = MeshCorePacketEncoder::buildPacket(RouteType::Flood,
-                                                        PayloadType::Ack, ack6);
+                                                        PayloadType::Ack, ack6,
+                                                        {}, floodHashSize());
         }
         if (ackPkt.success) {
             // Both reply forms are flood-routed with an empty path: the

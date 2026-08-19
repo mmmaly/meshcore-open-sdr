@@ -184,6 +184,11 @@ private:
     // Shared secret for a contact, computed once and cached
     const std::string& contactSecret(Contact& c);
     void persistContacts();
+    // Width every forwarder must use when appending its hash to a packet we
+    // originate. Firmware reads it from the packet, not from its own prefs
+    // (Mesh.cpp: copyHashTo(..., packet->getPathHashSize())), so the
+    // originator decides what relayed copies look like.
+    uint8_t floodHashSize() const { return (uint8_t)(pathHashMode_ + 1); }
     void loadPrefs();
     void savePrefs();
     void loadContactsFile();
