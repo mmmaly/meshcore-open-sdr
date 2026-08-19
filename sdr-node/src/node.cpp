@@ -443,7 +443,9 @@ void Node::handleSendDirectText(const std::vector<uint8_t>& f, const AppSender& 
     auto myPub = hexToBytes(id_.publicKeyHex);
     auto payload = PeerCrypto::buildTextMessagePayload(
         secret, destHash, myPub[0], ts, attempt, text);
-    bool direct = outPathLen != 0xFF && !outPath.empty();
+    // A learned empty path is meaningful: zero hops, the peer hears us
+    // directly - route direct with no path rather than flooding
+    bool direct = outPathLen != 0xFF;
     auto pkt = direct
         ? MeshCorePacketEncoder::buildPacket(RouteType::Direct,
               PayloadType::TextMessage, payload, outPath,
