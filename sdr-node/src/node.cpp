@@ -193,13 +193,15 @@ std::vector<uint8_t> Node::buildSelfInfo() {
 std::vector<uint8_t> Node::buildDeviceInfo() {
     std::vector<uint8_t> f(82, 0);
     f[0] = RESP_DEVICE_INFO;
-    f[1] = 8;                       // firmware ver code: stats supported
+    // Feature level, as apps gate on it: 8 stats, 9 client_repeat, 10 path
+    // hash mode, 13 channel data + node discovery. All of those are here.
+    f[1] = 13;
     f[2] = 100;                     // -> 200 max contacts
     f[3] = MAX_CHANNELS;
     strncpy((char*)f.data() + 8, __DATE__, 11);
     const char* manu = "MeshCore SDR (RTL-SDR rx, HackRF tx)";
     strncpy((char*)f.data() + 20, manu, 39);
-    strncpy((char*)f.data() + 60, "sdr-node 0.1", 19);
+    strncpy((char*)f.data() + 60, "sdr-node 0.2", 19);
     f[80] = 0;                      // client_repeat
     // path_hash_mode: width = mode + 1. This mesh is predominantly 2-byte
     // (measured ~69% of received packets), and traces that work use 2-byte
@@ -259,8 +261,8 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
         break;
     }
     case CMD_GET_AUTO_ADD_CONFIG: {
-        // overwriteOldest | chat | repeater | room | sensor
-        send({RESP_AUTO_ADD_CONFIG, 0x1F});
+        // [25][flags][max_hops]: overwriteOldest | chat | repeater | room | sensor
+        send({RESP_AUTO_ADD_CONFIG, 0x1F, 64});
         break;
     }
     case CMD_SET_AUTO_ADD_CONFIG:
@@ -444,6 +446,67 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
     case CMD_SEND_TXT_MSG:
         handleSendDirectText(f, send);
         break;
+    case CMD_SEND_CONTROL_DATA: {
+        // [55][payload...]; payload[0] high bit marks the discover subtype.
+        // Firmware sends these zero-hop, so only direct neighbours answer -
+        // which is exactly what "discover nearby nodes" means.
+        if (f.size() < 2 || (f[1] & 0x80) == 0) { send({RESP_ERR, 6}); break; }
+        std::vector<uint8_t> payload(f.begin() + 1, f.end());
+        auto pkt = MeshCorePacketEncoder::buildPacket(RouteType::Direct,
+                                                      PayloadType::Control, payload);
+        if (!pkt.success) { send({RESP_ERR, 4}); break; }
+        enqueueTx(toLower(bytesToHex(pkt.bytes)));
+        send({RESP_OK});
+        fprintf(stderr, "[node] control data sent (subtype 0x%02X), zero-hop\n",
+                f[1] >> 4);
+        break;
+    }
+    case CMD_SEND_CHANNEL_DATA: {
+        // [62][ch][path_len][path?][type_lo][type_hi][payload]
+        if (f.size() < 5) { send({RESP_ERR, 6}); break; }
+        uint8_t idx = f[1], pathLenByte = f[2];
+        size_t off = 3;
+        std::vector<uint8_t> path;
+        if (pathLenByte != 0xFF) {
+            size_t n = (size_t)(pathLenByte & 63) * (((pathLenByte >> 6) & 3) + 1);
+            if (f.size() < off + n + 2) { send({RESP_ERR, 6}); break; }
+            path.assign(f.begin() + off, f.begin() + off + n);
+            off += n;
+        }
+        if (f.size() < off + 2) { send({RESP_ERR, 6}); break; }
+        uint16_t dataType = (uint16_t)f[off] | ((uint16_t)f[off + 1] << 8);
+        off += 2;
+        std::vector<uint8_t> blob(f.begin() + off, f.end());
+
+        std::string keyHex;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (idx >= channels_.size() || channels_[idx].keyHex.empty()) {
+                send({RESP_ERR, 2});
+                break;
+            }
+            keyHex = channels_[idx].keyHex;
+        }
+        auto payload = MeshCorePacketEncoder::buildGroupDataPayload(keyHex, dataType, blob);
+        if (!payload.success) { send({RESP_ERR, 4}); break; }
+        bool direct = pathLenByte != 0xFF;
+        auto pkt = direct
+            ? MeshCorePacketEncoder::buildPacket(RouteType::Direct,
+                  PayloadType::GroupData, payload.bytes, path,
+                  (uint8_t)(((pathLenByte >> 6) & 3) + 1))
+            : MeshCorePacketEncoder::buildPacket(RouteType::Flood,
+                  PayloadType::GroupData, payload.bytes);
+        if (!pkt.success) { send({RESP_ERR, 4}); break; }
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            seen_[toLower(bytesToHex(payload.bytes))] = (double)time(nullptr);
+        }
+        enqueueTx(toLower(bytesToHex(pkt.bytes)));
+        send({RESP_OK});
+        fprintf(stderr, "[node] channel %u data queued: type 0x%04X, %zu bytes\n",
+                idx, dataType, blob.size());
+        break;
+    }
     case CMD_SEND_TRACE_PATH: {
         if (f.size() < 10) { send({RESP_ERR, 6}); break; }
         uint8_t flags = f[9];
@@ -1130,6 +1193,66 @@ void Node::onRxPacket(const RxPacket& pkt) {
         }
         fprintf(stderr, "[node] direct msg from %s (snr %.1f), acked\n",
                 senderName.c_str(), pkt.snr);
+    } else if (decoded.payloadType == PayloadType::Control) {
+        // Zero-hop only, matching firmware: discovery answers come from
+        // direct neighbours, and forwarding them would defeat the point.
+        auto payload = hexToBytes(decoded.payloadRaw);
+        if (payload.empty() || (payload[0] & 0x80) == 0) return;
+        if (decoded.pathLength != 0) return;
+        int snr4 = (int)lrintf(pkt.snr * 4.0f);
+        std::vector<uint8_t> p{PUSH_CONTROL_DATA,
+                               (uint8_t)(int8_t)std::max(-128, std::min(127, snr4)),
+                               (uint8_t)(int8_t)std::max(-128, std::min(127,
+                                   (int)(-105 + pkt.snr))),
+                               (uint8_t)decoded.pathLength};
+        p.insert(p.end(), payload.begin(), payload.end());
+        if (p.size() > 172) p.resize(172);
+        AppSender sender;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            sender = appSender_;
+        }
+        if (sender) sender(p);
+        fprintf(stderr, "[node] control data heard (subtype 0x%02X, snr %.1f)\n",
+                payload[0] >> 4, pkt.snr);
+    } else if (decoded.payloadType == PayloadType::GroupData) {
+        auto payload = hexToBytes(decoded.payloadRaw);
+        if (payload.size() < 4) return;
+        std::string hashHex = toLower(bytesToHex(payload.data(), 1));
+        int idx = -1;
+        std::string keyHex;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            for (size_t i = 0; i < channels_.size(); i++) {
+                if (channels_[i].keyHex.empty()) continue;
+                if (toLower(ChannelCrypto::calculateChannelHash(channels_[i].keyHex)) == hashHex) {
+                    idx = (int)i;
+                    keyHex = channels_[i].keyHex;
+                    break;
+                }
+            }
+        }
+        if (idx < 0) return;
+        auto plain = ChannelCrypto::decryptRaw(
+            bytesToHex(payload.data() + 3, payload.size() - 3),
+            bytesToHex(payload.data() + 1, 2), keyHex);
+        if (!plain || plain->size() < 3) return;
+        uint16_t dataType = (uint16_t)(*plain)[0] | ((uint16_t)(*plain)[1] << 8);
+        size_t dataLen = (*plain)[2];
+        if (dataLen > plain->size() - 3) return;
+
+        // [27][snr][res][res][ch][path_len][type_lo][type_hi][len][payload]
+        int snr4 = (int)lrintf(pkt.snr * 4.0f);
+        std::vector<uint8_t> f2{RESP_CHANNEL_DATA_RECV,
+                                (uint8_t)(int8_t)std::max(-128, std::min(127, snr4)),
+                                0, 0, (uint8_t)idx, decoded.pathLength,
+                                (uint8_t)(dataType & 0xFF), (uint8_t)(dataType >> 8),
+                                (uint8_t)dataLen};
+        f2.insert(f2.end(), plain->begin() + 3, plain->begin() + 3 + dataLen);
+        if (f2.size() > 172) f2.resize(172);
+        queueForApp(std::move(f2));
+        fprintf(stderr, "[node] channel %d data: type 0x%04X, %zu bytes (snr %.1f)\n",
+                idx, dataType, dataLen, pkt.snr);
     } else if (decoded.payloadType == PayloadType::Trace) {
         auto payload = hexToBytes(decoded.payloadRaw);
         if (payload.size() < 9) return;

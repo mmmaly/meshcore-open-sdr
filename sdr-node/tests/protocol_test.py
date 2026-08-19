@@ -134,6 +134,7 @@ r = recv_resp()
 check(r[0] == 13 and len(r) >= 82, "DEVICE_INFO (code 13, 82 bytes)")
 max_channels = r[3]
 check(max_channels == 8, "max_channels = 8")
+check(r[1] == 13, f"firmware ver code 13 (feature gate), got {r[1]}")
 
 # 2. APP_START -> SELF_INFO
 c.send(bytes([1, 1, 0, 0, 0, 0, 0, 0]) + b"MeshCoreOpen\x00")
@@ -526,6 +527,63 @@ if got_trace:
     check(got_trace[12:14] == bytes([0xAA, 0xBB]), "trace push carries route hashes")
     check(got_trace[14:16] == bytes([20, 12]), "trace push carries per-hop SNRs")
     check(got_trace[16] == 10, "trace push ends with the final SNR (2.5 dB x4)")
+
+# 6f. Node discovery: CONTROL data out zero-hop, and a neighbour's reply
+# surfaced to the app as PUSH_CONTROL_DATA
+c.send(bytes([55, 0x80, 0x00]) + struct.pack("<I", 0x99887766) + struct.pack("<I", 0))
+r = recv_resp()
+check(r[0] == 0, "CMD_SEND_CONTROL_DATA -> OK")
+time.sleep(0.6)
+ctrl_tx = None
+with open(tx_record) as f:
+    for line in f:
+        a2 = line.split()
+        if "-x" in a2:
+            b = bytes.fromhex(a2[a2.index("-x") + 1])
+            if (b[0] >> 2) & 0x0F == 0x0B:
+                ctrl_tx = b
+check(ctrl_tx is not None, "discovery request radiated as a CONTROL packet")
+if ctrl_tx:
+    check((ctrl_tx[0] & 3) == 2 and ctrl_tx[1] == 0,
+          "control data is direct-routed and zero-hop")
+    check(ctrl_tx[2] == 0x80, "control payload keeps the discover subtype")
+
+# a neighbour's discover response (subtype 0x90), zero-hop
+resp = bytes([0x0B << 2 | 0x02, 0x00, 0x90, 0x01, 0xAB, 0xCD])
+with open(rx_log, "a") as f:
+    f.write(f"rx cfg: freq=869618000 sf=7 bw=62500 snr=6.0 cfo=0.00 time={time.time():.3f}\n")
+    f.write(f"rx ok: {resp.hex()}\n")
+got_ctrl = None
+deadline = time.time() + 6
+while time.time() < deadline and got_ctrl is None:
+    try:
+        p = c.recv(1.0)
+    except socket.timeout:
+        continue
+    if p and p[0] == 0x8E:
+        got_ctrl = p
+    elif p and p[0] >= 0x80:
+        pushes.append(p)
+check(got_ctrl is not None, "PUSH_CONTROL_DATA for a neighbour's discover response")
+if got_ctrl:
+    check(got_ctrl[1] == 24, "control push carries SNR x4 (6.0 dB)")
+    check(got_ctrl[4] == 0x90, "control push carries the response subtype")
+    check(got_ctrl[4:] == bytes([0x90, 0x01, 0xAB, 0xCD]), "control payload passed through")
+
+# 6g. Channel data (GRP_DATA) both ways
+c.send(bytes([62, 0, 0xFF, 0x1C, 0xAE]) + b"blob")
+r = recv_resp()
+check(r[0] == 0, "CMD_SEND_CHANNEL_DATA -> OK")
+time.sleep(0.6)
+gd_tx = None
+with open(tx_record) as f:
+    for line in f:
+        a2 = line.split()
+        if "-x" in a2:
+            b = bytes.fromhex(a2[a2.index("-x") + 1])
+            if (b[0] >> 2) & 0x0F == 0x06:
+                gd_tx = b
+check(gd_tx is not None, "channel data radiated as a GRP_DATA packet")
 
 # 7. Unknown command -> RESP_ERR, daemon stays alive
 c.send(bytes([99]))

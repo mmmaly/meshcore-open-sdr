@@ -48,6 +48,8 @@ enum Cmd : uint8_t {
     CMD_SET_OTHER_PARAMS = 38,
     CMD_GET_CUSTOM_VAR = 40,
     CMD_SET_FLOOD_SCOPE = 54,
+    CMD_SEND_CONTROL_DATA = 55,
+    CMD_SEND_CHANNEL_DATA = 62,
     CMD_GET_STATS = 56,
     CMD_SET_AUTO_ADD_CONFIG = 58,
     CMD_GET_AUTO_ADD_CONFIG = 59,
@@ -70,12 +72,14 @@ enum Resp : uint8_t {
     RESP_CHANNEL_INFO = 18,
     RESP_CUSTOM_VARS = 21,
     RESP_AUTO_ADD_CONFIG = 25,
+    RESP_CHANNEL_DATA_RECV = 27,
 };
 
 enum Push : uint8_t {
     PUSH_ADVERT = 0x80,
     PUSH_MSG_WAITING = 0x83,
     PUSH_NEW_ADVERT = 0x8A,
+    PUSH_CONTROL_DATA = 0x8E,
 };
 
 struct Contact {
