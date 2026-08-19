@@ -627,7 +627,10 @@ void Node::onRxPacket(const RxPacket& pkt) {
         AppSender sender;
         {
             std::lock_guard<std::mutex> lk(mtx_);
+            auto prev = contacts_.find(toLower(a->publicKey));
+            if (prev != contacts_.end()) c.secretHex = prev->second.secretHex;
             contacts_[toLower(a->publicKey)] = c;
+            persistContacts();
             sender = appSender_;
         }
         if (sender) sender(buildContactFrame(c, PUSH_NEW_ADVERT));
