@@ -591,7 +591,8 @@ check(gd_tx is not None, "channel data radiated as a GRP_DATA packet")
 unknown_pub = "aa" * 32
 c.send(bytes([57]) + bytes.fromhex(unknown_pub) + bytes([0x01, 0x00]))
 r = recv_resp()
-check(r[0] == 6 and len(r) >= 10, "ANON_REQ answered with RESP_SENT")
+check(r[0] == 6 and len(r) >= 10 and r[1] == 0,
+      "ANON_REQ answered with RESP_SENT, flagged direct")
 anon_tag = struct.unpack_from("<I", r, 2)[0] if len(r) >= 10 else 0
 check(anon_tag != 0, "ANON_REQ reply carries a tag for matching")
 time.sleep(0.6)
@@ -605,6 +606,9 @@ with open(tx_record) as f:
                 anon_tx = b
 check(anon_tx is not None, "ANON_REQ radiated as an ANON_REQ packet")
 if anon_tx:
+    # repeaters drop flood-routed anon requests of these types outright
+    check((anon_tx[0] & 3) == 2, "ANON_REQ is direct-routed (repeaters ignore flood)")
+    check(anon_tx[1] == 0, "ANON_REQ is zero-hop when no path is known")
     check(anon_tx[2] == 0xAA, "ANON_REQ dest hash is the target node")
     self_pub = bytes.fromhex(node_pub) if node_pub else None
     if self_pub:

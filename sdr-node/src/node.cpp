@@ -760,9 +760,29 @@ void Node::handleAnonRequest(const std::vector<uint8_t>& f, const AppSender& sen
     payload.insert(payload.end(), myPub.begin(), myPub.end());   // full sender key
     payload.insert(payload.end(), mac.begin(), mac.end());
 
-    if (!sendToContact(target, PayloadTypeTag::AnonReq, payload)) {
-        send({RESP_ERR, 4});
-        return;
+    // Repeaters honour the non-login anon request types only when the packet
+    // is DIRECT-routed (see onAnonDataRecv in simple_repeater: every
+    // ANON_REQ_TYPE_* branch is guarded by packet->isRouteDirect(), and a
+    // flood-routed one is silently dropped). Route direct over a learned
+    // path when we have one, else zero-hop direct - which is exactly what
+    // firmware gets by defaulting a fresh anon contact to out_path_len 0.
+    bool routedDirect = true;
+    {
+        std::vector<uint8_t> path;
+        uint8_t pathLenByte = 0;
+        if (target.outPathLen != 0xFF) {
+            path = target.outPath;
+            pathLenByte = target.outPathLen;
+        }
+        auto pkt = MeshCorePacketEncoder::buildPacket(
+            RouteType::Direct, PayloadType::AnonRequest, payload, path,
+            (uint8_t)(((pathLenByte >> 6) & 3) + 1));
+        if (!pkt.success) { send({RESP_ERR, 4}); return; }
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            seen_[toLower(bytesToHex(payload))] = (double)time(nullptr);
+        }
+        enqueueTx(toLower(bytesToHex(pkt.bytes)));
     }
     {
         std::lock_guard<std::mutex> lk(mtx_);
@@ -771,14 +791,16 @@ void Node::handleAnonRequest(const std::vector<uint8_t>& f, const AppSender& sen
         persistContacts();
     }
 
-    // SENT: [6][is_flood][tag4][est_timeout4] - the app matches the tag to
+    // SENT: [6][is_flood=0][tag4][est_timeout4] - the app matches the tag to
     // the BINARY_RESPONSE push that follows
-    std::vector<uint8_t> r{RESP_SENT, (uint8_t)(target.outPathLen == 0xFF ? 1 : 0)};
+    std::vector<uint8_t> r{RESP_SENT, 0};
     putU32(r, tag);
     putU32(r, 20000);
     send(r);
-    fprintf(stderr, "[node] anon request sent to %.12s... (tag %08X, %zu byte body)\n",
-            key.c_str(), tag, f.size() - 33);
+    fprintf(stderr, "[node] anon request sent to %.12s... (tag %08X, %zu byte body, "
+            "direct %s)\n", key.c_str(), tag, f.size() - 33,
+            target.outPathLen == 0xFF ? "zero-hop" : "over learned path");
+    (void)routedDirect;
 }
 
 void Node::handleRepeaterRequest(const std::vector<uint8_t>& f, const AppSender& send,
