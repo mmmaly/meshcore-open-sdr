@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <sys/stat.h>
+#include <cctype>
 
 #include "meshcore/meshcore.h"
 
@@ -99,12 +100,20 @@ void Node::persistContacts() {
     fclose(f);
 }
 
+static bool isHexStr(const char* s) {
+    if (!s || !*s) return false;
+    for (const char* p = s; *p; p++)
+        if (!isxdigit((unsigned char)*p)) return false;
+    return true;
+}
+
 void Node::loadContactsFile() {
     FILE* f = fopen(cfg_.contacts_file.c_str(), "r");
     if (!f) return;
     char line[512];
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == '#') continue;
+        try {
         char key[130] = {0}, name[64] = {0}, pathhex[140] = {0}, advhex[140] = {0};
         unsigned type = 1, adv = 0, mod = 0, opl = 0xFF, apl = 0xFF, arecv = 0;
         int lat = 0, lon = 0;
@@ -113,11 +122,15 @@ void Node::loadContactsFile() {
                        "\t%u\t%139[^\t]\t%u\t%63[^\n]",
                        key, &type, &adv, &mod, &lat, &lon, &opl, pathhex,
                        &apl, advhex, &arecv, name);
-        if (n < 12)    // format without advert-path columns
+        if (n < 12) {  // format without advert-path columns. A partial match
+            // above can leave junk in the advert fields (a name starting with
+            // a digit parses as %u), so reset them before re-parsing.
+            apl = 0xFF; arecv = 0; advhex[0] = 0; name[0] = 0;
             n = sscanf(line, "%129[^\t]\t%u\t%u\t%u\t%d\t%d\t%u\t%139[^\t]\t%63[^\n]",
                        key, &type, &adv, &mod, &lat, &lon, &opl, pathhex, name);
+        }
         if (n < 9) {   // old format without path columns
-            opl = 0xFF; pathhex[0] = 0;
+            opl = 0xFF; pathhex[0] = 0; name[0] = 0;
             n = sscanf(line, "%129[^\t]\t%u\t%u\t%u\t%d\t%d\t%63[^\n]",
                        key, &type, &adv, &mod, &lat, &lon, name);
         }
@@ -130,13 +143,17 @@ void Node::loadContactsFile() {
             c.lat = lat; c.lon = lon;
             c.name = name;
             c.outPathLen = (uint8_t)opl;
-            if (pathhex[0] && strcmp(pathhex, "-") != 0)
-                c.outPath = hexToBytes(pathhex);
+            if (isHexStr(pathhex)) c.outPath = hexToBytes(pathhex);
+            else c.outPathLen = 0xFF;
             c.advPathLen = (uint8_t)apl;
             c.advRecvTime = arecv;
-            if (advhex[0] && strcmp(advhex, "-") != 0)
-                c.advPath = hexToBytes(advhex);
+            if (isHexStr(advhex)) c.advPath = hexToBytes(advhex);
+            else c.advPathLen = 0xFF;
             contacts_[toLower(key)] = c;
+        }
+        } catch (const std::exception& e) {
+            // A corrupt row must never stop the node from starting
+            fprintf(stderr, "[config] skipping bad contact row: %s\n", e.what());
         }
     }
     fclose(f);
