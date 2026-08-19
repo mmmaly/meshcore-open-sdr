@@ -20,6 +20,9 @@
 #include "node_config.h"
 #include "radio_sdr.h"
 
+// Local alias so the header need not pull in the decoder's enums
+enum class PayloadTypeTag : uint8_t { Req = 0x00, Response = 0x01, AnonReq = 0x07 };
+
 // Companion protocol constants (meshcore_protocol.dart)
 enum Cmd : uint8_t {
     CMD_APP_START = 1,
@@ -36,6 +39,8 @@ enum Cmd : uint8_t {
     CMD_SET_ADVERT_LATLON = 14,
     CMD_REMOVE_CONTACT = 15,
     CMD_GET_BATT_AND_STORAGE = 20,
+    CMD_SEND_LOGIN = 26,
+    CMD_SEND_STATUS_REQ = 27,
     CMD_DEVICE_QUERY = 22,
     CMD_GET_CHANNEL = 31,
     CMD_SET_CHANNEL = 32,
@@ -96,6 +101,14 @@ struct PendingAck {
     double sentAt = 0.0;
 };
 
+// An outstanding repeater request awaiting its RESPONSE payload
+struct PendingReq {
+    enum Kind { Login, Status, Cli } kind = Login;
+    std::vector<uint8_t> pubKey;   // 32
+    uint32_t tag = 0;
+    double sentAt = 0.0;
+};
+
 // A frame waiting for the app's CMD_SYNC_NEXT_MESSAGE pull
 struct QueuedMessage {
     std::vector<uint8_t> frame;    // ready-to-send RESP_CHANNEL_MSG_RECV frame
@@ -137,6 +150,13 @@ private:
     std::vector<uint8_t> buildSelfInfo();
     void handleSendDirectText(const std::vector<uint8_t>& f, const AppSender& send);
     void handleAddUpdateContact(const std::vector<uint8_t>& f, const AppSender& send);
+    void handleRepeaterRequest(const std::vector<uint8_t>& f, const AppSender& send,
+                               PendingReq::Kind kind);
+    // Route a datagram to a contact: direct over a learned path, else flood
+    bool sendToContact(const Contact& c, PayloadTypeTag type,
+                       const std::vector<uint8_t>& payload);
+    void onContactResponse(const Contact& c, const std::vector<uint8_t>& data,
+                           double now);
     // Shared secret for a contact, computed once and cached
     const std::string& contactSecret(Contact& c);
     void persistContacts();
@@ -157,6 +177,7 @@ private:
     std::deque<QueuedMessage> inbox_;
     std::map<std::string, double> seen_;            // payload hash -> time
     std::deque<PendingAck> pendingAcks_;
+    std::deque<PendingReq> pendingReqs_;
     AppSender appSender_;
     float lastSnr_ = 0.0f;
     double txAirSecs_ = 0.0, rxAirSecs_ = 0.0;

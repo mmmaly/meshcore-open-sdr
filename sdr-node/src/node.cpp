@@ -411,6 +411,12 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
     case CMD_SEND_TXT_MSG:
         handleSendDirectText(f, send);
         break;
+    case CMD_SEND_LOGIN:
+        handleRepeaterRequest(f, send, PendingReq::Login);
+        break;
+    case CMD_SEND_STATUS_REQ:
+        handleRepeaterRequest(f, send, PendingReq::Status);
+        break;
     case 9 /*CMD_ADD_UPDATE_CONTACT*/:
         handleAddUpdateContact(f, send);
         break;
@@ -451,7 +457,52 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
 void Node::handleSendDirectText(const std::vector<uint8_t>& f, const AppSender& send) {
     if (f.size() < 14) { send({RESP_ERR, 6 /*illegal arg*/}); return; }
     uint8_t txt_type = f[1];
-    if (txt_type != 0) { send({RESP_ERR, 1 /*unsupported: CLI needs login*/}); return; }
+    if (txt_type == 1) {
+        // CLI command to a repeater: REQ payload [tag4][text], answered by a
+        // RESPONSE we surface as a CLI_DATA message frame
+        std::string text((const char*)f.data() + 13, f.size() - 13);
+        auto nulc = text.find('\0');
+        if (nulc != std::string::npos) text.resize(nulc);
+        const uint8_t* prefix6 = f.data() + 7;
+        Contact target;
+        std::string secret;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            Contact* match = nullptr;
+            for (auto& [k, c] : contacts_)
+                if (memcmp(c.pubKey.data(), prefix6, 6) == 0) { match = &c; break; }
+            if (!match) { send({RESP_ERR, 2}); return; }
+            secret = contactSecret(*match);
+            target = *match;
+        }
+        uint32_t tag = (uint32_t)time(nullptr);
+        std::vector<uint8_t> plain;
+        putU32(plain, tag);
+        plain.insert(plain.end(), text.begin(), text.end());
+        auto mac = PeerCrypto::encryptThenMac(secret, plain);
+        std::vector<uint8_t> payload;
+        payload.push_back(target.pubKey[0]);
+        payload.push_back(hexToBytes(id_.publicKeyHex)[0]);
+        payload.insert(payload.end(), mac.begin(), mac.end());
+        if (!sendToContact(target, PayloadTypeTag::Req, payload)) {
+            send({RESP_ERR, 4});
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            pendingReqs_.push_back({PendingReq::Cli, target.pubKey, tag,
+                                    (double)time(nullptr)});
+            while (pendingReqs_.size() > 16) pendingReqs_.pop_front();
+        }
+        // CLI sends expect no ACK: ack hash 0 tells the app not to wait
+        std::vector<uint8_t> r{RESP_SENT, (uint8_t)(target.outPathLen == 0xFF ? 1 : 0)};
+        putU32(r, 0);
+        putU32(r, 20000);
+        send(r);
+        fprintf(stderr, "[node] CLI cmd to %s: %s\n", target.name.c_str(), text.c_str());
+        return;
+    }
+    if (txt_type != 0) { send({RESP_ERR, 1}); return; }
     uint8_t attempt = f[2];
     uint32_t ts = getU32(f.data() + 3);
     const uint8_t* prefix = f.data() + 7;
@@ -513,6 +564,166 @@ void Node::handleSendDirectText(const std::vector<uint8_t>& f, const AppSender& 
     send(r);
     fprintf(stderr, "[node] direct tx queued to %.12s... (%zu chars, %s)\n",
             destPubHex.c_str(), text.size(), direct ? "routed" : "flood");
+}
+
+// Route to a contact: direct over a learned path when we have one, else flood
+bool Node::sendToContact(const Contact& c, PayloadTypeTag type,
+                         const std::vector<uint8_t>& payload) {
+    PayloadType pt = type == PayloadTypeTag::AnonReq ? PayloadType::AnonRequest
+                   : type == PayloadTypeTag::Req     ? PayloadType::Request
+                                                     : PayloadType::Response;
+    bool direct = c.outPathLen != 0xFF;
+    auto pkt = direct
+        ? MeshCorePacketEncoder::buildPacket(RouteType::Direct, pt, payload,
+              c.outPath, (uint8_t)(((c.outPathLen >> 6) & 3) + 1))
+        : MeshCorePacketEncoder::buildPacket(RouteType::Flood, pt, payload);
+    if (!pkt.success) return false;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        seen_[toLower(bytesToHex(payload))] = (double)time(nullptr);
+    }
+    enqueueTx(toLower(bytesToHex(pkt.bytes)));
+    return true;
+}
+
+// CMD_SEND_LOGIN [26][pub32][password..], CMD_SEND_STATUS_REQ [27][pub32],
+// and CLI text (CMD_SEND_TXT_MSG with txt_type=1) all end up here: an
+// encrypted request to a repeater whose RESPONSE we then match by tag.
+void Node::handleRepeaterRequest(const std::vector<uint8_t>& f, const AppSender& send,
+                                 PendingReq::Kind kind) {
+    size_t keyOff = 1;
+    if (f.size() < keyOff + 32) { send({RESP_ERR, 6}); return; }
+    std::string key = toLower(bytesToHex(f.data() + keyOff, 32));
+
+    Contact target;
+    std::string secret;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        auto it = contacts_.find(key);
+        if (it == contacts_.end()) { send({RESP_ERR, 2}); return; }
+        secret = contactSecret(it->second);
+        target = it->second;
+    }
+
+    uint32_t tag = (uint32_t)time(nullptr);
+    std::vector<uint8_t> plain;
+    putU32(plain, tag);
+
+    PayloadTypeTag ptype;
+    if (kind == PendingReq::Login) {
+        // ANON_REQ: [dest_hash][our pubkey32][mac2][enc(tag4 + password)]
+        std::string password((const char*)f.data() + keyOff + 32,
+                             f.size() - keyOff - 32);
+        auto nul = password.find('\0');
+        if (nul != std::string::npos) password.resize(nul);
+        if (password.size() > 15) password.resize(15);
+        plain.insert(plain.end(), password.begin(), password.end());
+        ptype = PayloadTypeTag::AnonReq;
+    } else {
+        // REQ: [tag4][req_type][reserved4][random4]
+        plain.push_back(1 /*REQ_TYPE_GET_STATUS*/);
+        for (int i = 0; i < 4; i++) plain.push_back(0);
+        for (int i = 0; i < 4; i++) plain.push_back((uint8_t)(rand() & 0xFF));
+        ptype = PayloadTypeTag::Req;
+    }
+
+    auto mac = PeerCrypto::encryptThenMac(secret, plain);
+    std::vector<uint8_t> payload;
+    payload.push_back(target.pubKey[0]);            // dest hash
+    if (ptype == PayloadTypeTag::AnonReq) {
+        auto myPub = hexToBytes(id_.publicKeyHex);  // full sender key
+        payload.insert(payload.end(), myPub.begin(), myPub.end());
+    } else {
+        payload.push_back(hexToBytes(id_.publicKeyHex)[0]);   // src hash
+    }
+    payload.insert(payload.end(), mac.begin(), mac.end());
+
+    if (!sendToContact(target, ptype, payload)) { send({RESP_ERR, 4}); return; }
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        pendingReqs_.push_back({kind, target.pubKey, tag, (double)time(nullptr)});
+        while (pendingReqs_.size() > 16) pendingReqs_.pop_front();
+    }
+
+    // Both commands are answered like a send: SENT with a timeout estimate
+    std::vector<uint8_t> r{RESP_SENT, (uint8_t)(target.outPathLen == 0xFF ? 1 : 0)};
+    putU32(r, 0);
+    putU32(r, 20000);
+    send(r);
+    fprintf(stderr, "[node] %s request sent to %s\n",
+            kind == PendingReq::Login ? "login" : "status", target.name.c_str());
+}
+
+// A decrypted RESPONSE payload: [tag4][data...]. Match it to what we asked.
+void Node::onContactResponse(const Contact& c, const std::vector<uint8_t>& data,
+                             double now) {
+    if (data.size() < 4) return;
+    uint32_t tag = getU32(data.data());
+    PendingReq req;
+    bool matched = false;
+    AppSender sender;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        for (auto it = pendingReqs_.begin(); it != pendingReqs_.end(); ++it) {
+            if (it->pubKey == c.pubKey &&
+                (it->tag == tag || now - it->sentAt < 60.0)) {
+                req = *it;
+                matched = true;
+                pendingReqs_.erase(it);
+                break;
+            }
+        }
+        sender = appSender_;
+    }
+    if (!matched || !sender) return;
+
+    if (req.kind == PendingReq::Login) {
+        bool legacyOk = data.size() >= 6 && memcmp(data.data() + 4, "OK", 2) == 0;
+        bool newOk = data.size() >= 13 && data[4] == 0 /*RESP_SERVER_LOGIN_OK*/;
+        std::vector<uint8_t> p;
+        if (legacyOk || newOk) {
+            p.push_back(0x85);                       // PUSH_LOGIN_SUCCESS
+            p.push_back(newOk ? data[6] : 0);        // permissions
+            p.insert(p.end(), c.pubKey.begin(), c.pubKey.begin() + 6);
+            if (newOk) {
+                putU32(p, tag);                      // server timestamp
+                p.push_back(data[7]);                // ACL permissions
+                p.push_back(data[12]);               // firmware ver level
+            }
+            fprintf(stderr, "[node] login OK at %s\n", c.name.c_str());
+        } else {
+            p.push_back(0x86);                       // PUSH_LOGIN_FAIL
+            p.push_back(0);
+            p.insert(p.end(), c.pubKey.begin(), c.pubKey.begin() + 6);
+            fprintf(stderr, "[node] login REJECTED at %s\n", c.name.c_str());
+        }
+        sender(p);
+    } else if (req.kind == PendingReq::Cli) {
+        // Deliver as a CLI_DATA contact message so the app's repeater
+        // console shows the reply text
+        std::string text((const char*)data.data() + 4, data.size() - 4);
+        auto nul = text.find('\0');
+        if (nul != std::string::npos) text.resize(nul);
+        std::vector<uint8_t> fr{RESP_CONTACT_MSG_RECV_V3, 0, 0, 0};
+        fr.insert(fr.end(), c.pubKey.begin(), c.pubKey.begin() + 6);
+        fr.push_back(c.outPathLen);
+        fr.push_back(1 /*TXT_TYPE_CLI_DATA*/);
+        putU32(fr, (uint32_t)now);
+        fr.insert(fr.end(), text.begin(), text.end());
+        fr.push_back(0);
+        if (fr.size() > 172) fr.resize(172);
+        queueForApp(std::move(fr));
+        fprintf(stderr, "[node] CLI reply from %s: %s\n", c.name.c_str(), text.c_str());
+    } else {
+        // PUSH_STATUS_RESPONSE: [0x87][reserved][prefix6][status bytes]
+        std::vector<uint8_t> p{0x87, 0};
+        p.insert(p.end(), c.pubKey.begin(), c.pubKey.begin() + 6);
+        p.insert(p.end(), data.begin() + 4, data.end());
+        if (p.size() > 172) p.resize(172);
+        sender(p);
+        fprintf(stderr, "[node] status response from %s (%zu B)\n",
+                c.name.c_str(), data.size() - 4);
+    }
 }
 
 // [9][pub32][type][flags][pathlen][path64][name32][ts4][lat4 lon4]?[lastmod4]?
@@ -849,6 +1060,23 @@ void Node::onRxPacket(const RxPacket& pkt) {
         }
         fprintf(stderr, "[node] direct msg from %s (snr %.1f), acked\n",
                 senderName.c_str(), pkt.snr);
+    } else if (decoded.payloadType == PayloadType::Response) {
+        auto payload = hexToBytes(decoded.payloadRaw);
+        auto myPub = hexToBytes(id_.publicKeyHex);
+        if (payload.size() < 20 || payload[0] != myPub[0]) return;
+        uint8_t srcHash = payload[1];
+        std::optional<std::vector<uint8_t>> plain;
+        Contact from;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            for (auto& [k, c] : contacts_) {
+                if (c.pubKey[0] != srcHash) continue;
+                plain = PeerCrypto::macThenDecrypt(contactSecret(c),
+                                                   payload.data() + 2, payload.size() - 2);
+                if (plain) { from = c; break; }
+            }
+        }
+        if (plain) onContactResponse(from, *plain, pkt.time);
     } else if (decoded.payloadType == PayloadType::Path) {
         auto payload = hexToBytes(decoded.payloadRaw);
         auto myPub = hexToBytes(id_.publicKeyHex);
@@ -900,6 +1128,19 @@ void Node::onRxPacket(const RxPacket& pkt) {
                 senderPubHex.c_str(), plByte & 63,
                 extraType == 3 ? " with ACK" : "");
 
+        // The extra may instead carry a RESPONSE (repeaters answer flood
+        // requests this way, teaching us the path at the same time)
+        if (extraType == 1 /*PAYLOAD_TYPE_RESPONSE*/ &&
+            d.size() > 1 + pathBytes + 1) {
+            std::vector<uint8_t> resp(d.begin() + 1 + pathBytes + 1, d.end());
+            Contact from;
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                auto it = contacts_.find(senderPubHex);
+                if (it != contacts_.end()) from = it->second;
+            }
+            if (!from.pubKey.empty()) onContactResponse(from, resp, pkt.time);
+        }
         // The extra often carries the delivery ACK for a flood DM we sent
         if (extraType == 3 && d.size() >= 1 + pathBytes + 1 + 4) {
             uint32_t ackVal = getU32(d.data() + 1 + pathBytes + 1);

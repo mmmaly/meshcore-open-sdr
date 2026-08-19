@@ -29,8 +29,14 @@ persisted; periodic + manual self adverts; radio/core stats; live radio
 retune from the app. Works with both meshcore-open and the official app
 (every reply byte-verified against the real firmware source).
 
-**Not yet:** repeater administration (login/status/CLI), trace paths,
-GRP_DATA blobs (image transfer), acting as a repeater (deliberately).
+Repeater administration works too: login (ANON_REQ carrying our public
+key, so a repeater can answer a node it has never met), status requests,
+and the CLI console - each an encrypted request whose RESPONSE is matched
+back to the pending command, including responses that arrive folded into
+a PATH return.
+
+**Not yet:** trace paths, GRP_DATA blobs (image transfer), acting as a
+repeater (deliberately).
 
 ## Build
 

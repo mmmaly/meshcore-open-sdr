@@ -349,6 +349,131 @@ if "DM" in packets:
     r = recv_resp()
     check(r[0] == 6 and r[1] == 1, "post-reset DM sent as flood again")
 
+# 6d. Repeater admin: login, status and CLI are encrypted requests whose
+# RESPONSE we craft with the peer key and inject through the fake radio.
+if "DM" in packets:
+    import hashlib, hmac as _hmac
+    from binascii import unhexlify
+
+    def peer_secret():
+        # Recompute the peer<->node ECDH secret using the packet generator's
+        # own crypto by asking it for a DM and reusing that path is overkill;
+        # instead build responses with the C++ helper below.
+        return None
+
+    def make_response(tag: int, body: bytes, as_path_extra=False) -> str:
+        """Build a RESPONSE packet from the peer using the helper binary."""
+        env = dict(os.environ, NODE_PUB=node_pub or "")
+        out = subprocess.run([PACKETGEN, "resp", struct.pack("<I", tag).hex(),
+                              body.hex()],
+                             capture_output=True, text=True, env=env).stdout
+        d = dict(l.split() for l in out.splitlines() if " " in l)
+        return d["RESPPKT"].lower()
+
+    # --- login ---
+    c.send(bytes([26]) + unhexlify(packets["PEERPUB"]) + b"heslo123\x00")
+    r = recv_resp()
+    check(r[0] == 6, "CMD_SEND_LOGIN answered with SENT")
+    time.sleep(0.6)
+    login_tx = None
+    with open(tx_record) as f:
+        for line in f:
+            a2 = line.split()
+            if "-x" in a2:
+                b = bytes.fromhex(a2[a2.index("-x") + 1])
+                if (b[0] >> 2) & 0x0F == 0x07:
+                    login_tx = b
+    check(login_tx is not None, "login went out as an ANON_REQ packet")
+    if login_tx:
+        # payload: dest_hash + our full 32-byte pubkey + mac + cipher
+        off = 2
+        check(login_tx[off + 1:off + 33].hex() == node_pub,
+              "ANON_REQ carries our full public key")
+
+    # server answers RESP_SERVER_LOGIN_OK(0) + keepalive + perms + acl ... + fw
+    body = bytes([0, 4, 0x01, 0x02, 0, 0, 0, 0, 7])
+    tagv = int(time.time())
+    with open(rx_log, "a") as f:
+        f.write(f"rx cfg: freq=869618000 sf=7 bw=62500 snr=2.0 cfo=0.00 time={time.time():.3f}\n")
+        f.write(f"rx ok: {make_response(tagv, body)}\n")
+    got_login = None
+    deadline = time.time() + 6
+    while time.time() < deadline and got_login is None:
+        try:
+            p = c.recv(1.0)
+        except socket.timeout:
+            continue
+        if p and p[0] in (0x85, 0x86):
+            got_login = p
+        elif p and p[0] >= 0x80:
+            pushes.append(p)
+    check(got_login is not None and got_login[0] == 0x85, "PUSH_LOGIN_SUCCESS received")
+    if got_login and got_login[0] == 0x85:
+        check(got_login[1] == 0x01, "login permissions byte forwarded")
+        check(got_login[2:8].hex() == packets["PEERPUB"][:12], "login prefix matches peer")
+
+    # --- status ---
+    c.send(bytes([27]) + unhexlify(packets["PEERPUB"]))
+    r = recv_resp()
+    check(r[0] == 6, "CMD_SEND_STATUS_REQ answered with SENT")
+    status_body = bytes(range(20))
+    tagv = int(time.time())
+    with open(rx_log, "a") as f:
+        f.write(f"rx cfg: freq=869618000 sf=7 bw=62500 snr=2.0 cfo=0.00 time={time.time():.3f}\n")
+        f.write(f"rx ok: {make_response(tagv, status_body)}\n")
+    got_status = None
+    deadline = time.time() + 6
+    while time.time() < deadline and got_status is None:
+        try:
+            p = c.recv(1.0)
+        except socket.timeout:
+            continue
+        if p and p[0] == 0x87:
+            got_status = p
+        elif p and p[0] >= 0x80:
+            pushes.append(p)
+    check(got_status is not None, "PUSH_STATUS_RESPONSE received")
+    if got_status:
+        check(got_status[8:28] == status_body, "status payload forwarded verbatim")
+
+    # --- CLI ---
+    c.send(bytes([2, 1, 0]) + struct.pack("<I", int(time.time())) +
+           unhexlify(packets["PEERPUB"][:12]) + b"get stats\x00")
+    r = recv_resp()
+    check(r[0] == 6 and struct.unpack_from("<I", r, 2)[0] == 0,
+          "CLI send answered with SENT and no expected ack")
+    time.sleep(0.6)
+    cli_tx = None
+    with open(tx_record) as f:
+        for line in f:
+            a2 = line.split()
+            if "-x" in a2:
+                b = bytes.fromhex(a2[a2.index("-x") + 1])
+                if (b[0] >> 2) & 0x0F == 0x00:
+                    cli_tx = b
+    check(cli_tx is not None, "CLI command went out as a REQ packet")
+    tagv = int(time.time())
+    with open(rx_log, "a") as f:
+        f.write(f"rx cfg: freq=869618000 sf=7 bw=62500 snr=2.0 cfo=0.00 time={time.time():.3f}\n")
+        f.write(f"rx ok: {make_response(tagv, b'uptime 1234s')}\n")
+    got_cli = None
+    deadline = time.time() + 6
+    while time.time() < deadline and got_cli is None:
+        try:
+            p = c.recv(1.0)
+        except socket.timeout:
+            c.send(bytes([10]))
+            continue
+        if p and p[0] == 16 and p[11] == 1:
+            got_cli = p
+        elif p and p[0] >= 0x80:
+            pushes.append(p)
+            if p[0] == 0x83:
+                c.send(bytes([10]))
+    check(got_cli is not None, "CLI reply delivered as a CLI_DATA message")
+    if got_cli:
+        check(got_cli[16:].split(b"\x00")[0] == b"uptime 1234s", "CLI reply text")
+
 # 7. Unknown command -> RESP_ERR, daemon stays alive
 c.send(bytes([99]))
 r = recv_resp()
