@@ -21,10 +21,32 @@ LoRa modulation/demodulation is
 `lora_rx`/`lora_tx`, run as child processes so a receiver crash never takes
 the node down.
 
-**V1 scope:** channel (group) chat in both directions, self adverts, and
-contacts learned from heard adverts. Direct (private) messages need X25519
-contact crypto that meshcore-cpp-decoder does not have yet; the daemon
-answers those with "unsupported" so the app shows a clean failure.
+**Implemented:** channel (group) chat both directions; direct (private)
+messages with end-to-end ECDH encryption, automatic ACKs and delivery
+confirmations; directed routing (paths learned from PATH returns, DMs go
+direct once a route is known, flood otherwise); contacts from adverts,
+persisted; periodic + manual self adverts; radio/core stats; live radio
+retune from the app. Works with both meshcore-open and the official app
+(every reply byte-verified against the real firmware source).
+
+Repeater administration works too: login (ANON_REQ carrying our public
+key, so a repeater can answer a node it has never met), status requests,
+and the CLI console - each an encrypted request whose RESPONSE is matched
+back to the pending command, including responses that arrive folded into
+a PATH return.
+
+Trace paths work: the app's path-trace map can probe a route and get the
+per-hop SNRs back.
+
+Node discovery works (zero-hop CONTROL packets, so only direct neighbours
+answer), including the follow-up "request name": an anonymous request
+(CMD 57) carries our full public key so a node we have never met can
+derive the shared secret and reply, and the answer is matched back by tag, and GRP_DATA blobs - the transport the app uses for images - are
+carried both ways. DEVICE_INFO reports feature level 13, matching firmware
+v1.17.1, because everything that level gates is implemented.
+
+**Not yet:** acting as a repeater (deliberately - at ~25 mW it would be a
+weak one, and it would double the node's airtime).
 
 ## Build
 
@@ -51,13 +73,50 @@ cp sdr-node.conf.example sdr-node.conf   # edit: radio devices, ppm, name
   Keep this file out of git.
 - In the app: **Connect via TCP** → host = the daemon machine, port 5000.
 
+## Running as a service
+
+The macmini deployment runs under systemd (`/etc/systemd/system/
+meshcore-sdr-node.service`, Restart=always, logs appended to
+`~/sdr-node.log`) so the node survives crashes and reboots; the laptop
+reaches it through a LaunchAgent-managed ssh tunnel
+(`~/Library/LaunchAgents/net.mmm.sdr-tunnel.plist`, local port 5001 -
+macOS AirPlay squats on 5000).
+
+## Testing
+
+`ctest` runs the whole protocol surface against fake radios - no SDR, no
+mesh, a couple of seconds:
+
+```bash
+cd build && ctest --output-on-failure
+```
+
+The test drives the real daemon over a real socket, speaking the app's
+exact framing, and walks the connect handshake field by field, channel
+sync, the offline queue, contacts, channel and direct messages, delivery
+ACKs, routing (a PATH return must teach a route and the next message must
+radiate over it), traces, discovery, channel data and anonymous requests -
+asserting on the bytes actually handed to the transmitter. 87 assertions.
+
+Packets injected into the fake receiver are built by the real encoder, and
+"transmitted" packets are decoded back with the real decoder, so a change
+that breaks the wire format fails the test rather than the mesh.
+
 ## Notes and limits
 
 - One app client at a time; a new connection replaces the old one.
-- `SET_RADIO_PARAMS` from the app retunes the **transmit** side immediately;
-  the receiver keeps its configured channel fan-out until the daemon is
-  restarted (the RX side can watch several channels/SFs at once, which a
-  real SX1262 node cannot).
+- `SET_RADIO_PARAMS` retunes the transmitter immediately and appends the
+  new frequency to the receiver's channel list, bouncing `lora_rx` to pick
+  it up. The RX side can watch several channels and spreading factors at
+  once, which a real SX1262 node cannot.
+- Anonymous requests (the "request name" flow) are sent direct, never
+  flood: repeaters guard every non-login `ANON_REQ_TYPE_*` branch with
+  `isRouteDirect()` and silently drop flood-routed ones.
+- Delivery receipts and trace results are single unacknowledged packets. At
+  these power levels a lost one looks exactly like a timeout even though
+  the message itself arrived.
+- At ~25 mW EIRP the node is heard by nearby repeaters but is not a
+  long-range station; `tx_vga`/`tx_amp` are already at the HackRF maximum.
 - The RTL-SDR hears the HackRF's own transmissions; the daemon dedups them
   (as it dedups mesh flood rebroadcasts) by payload within a 10-minute window.
 - Duty cycle: `lora_tx` enforces `tx_duty` (default 10%, the EU 869.4-869.65

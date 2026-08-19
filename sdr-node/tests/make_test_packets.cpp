@@ -1,12 +1,44 @@
 // Emits test mesh packets (hex) for the fake-radio protocol test:
-// a GroupText on the well-known public channel and a signed advert.
+// a GroupText on the well-known public channel, a signed advert, and -
+// when the node public key is passed as argv[1] - a direct message from a
+// fixed test peer to that node.
 #include <cstdio>
+#include <cstdlib>
 #include "meshcore/meshcore.h"
+#include "meshcore/crypto/peer_crypto.h"
 
 using namespace meshcore;
 
-int main() {
+static const std::string kPeerSeed =
+    "3333333333333333333333333333333333333333333333333333333333333333";
+
+int main(int argc, char* argv[]) {
     const std::string pubChannel = "8b3387e9c5cdea6ac9e5edbaa115cd72";
+
+    // "resp <tag_hex_le> <body_hex>" mode: a RESPONSE packet from the test
+    // peer to the node, used by the repeater-admin tests.
+    if (argc > 3 && std::string(argv[1]) == "resp") {
+        // argv[0] path, argv[1] "resp": the node pubkey came in argv[1] in
+        // normal mode, so here it is taken from the environment instead
+        const char* nodePubEnv = getenv("NODE_PUB");
+        if (!nodePubEnv) { fprintf(stderr, "NODE_PUB unset\n"); return 1; }
+        std::string nodePub = nodePubEnv;
+        std::string peerPub = Ed25519::derivePublicKey(kPeerSeed + kPeerSeed);
+        std::string secret = PeerCrypto::keyExchange(kPeerSeed + kPeerSeed, nodePub);
+        auto tagBytes = hexToBytes(argv[2]);
+        auto body = hexToBytes(argv[3]);
+        std::vector<uint8_t> plain(tagBytes.begin(), tagBytes.end());
+        plain.insert(plain.end(), body.begin(), body.end());
+        auto mac = PeerCrypto::encryptThenMac(secret, plain);
+        std::vector<uint8_t> payload;
+        payload.push_back(hexToBytes(nodePub)[0]);
+        payload.push_back(hexToBytes(peerPub)[0]);
+        payload.insert(payload.end(), mac.begin(), mac.end());
+        auto pkt = MeshCorePacketEncoder::buildPacket(
+            RouteType::Flood, PayloadType::Response, payload);
+        printf("RESPPKT %s\n", bytesToHex(pkt.bytes).c_str());
+        return 0;
+    }
 
     auto gt = MeshCorePacketEncoder::buildGroupTextPayload(
         pubChannel, "TestPeer", "hello from the fake mesh", 1787090000u, 0);
@@ -23,5 +55,44 @@ int main() {
     auto advPkt = MeshCorePacketEncoder::buildPacket(
         RouteType::Flood, PayloadType::Advert, adv.bytes);
     printf("ADVERT %s\n", bytesToHex(advPkt.bytes).c_str());
+
+    if (argc > 1) {
+        std::string nodePub = argv[1];
+        const std::string& peerSeed = kPeerSeed;
+        std::string peerPub = Ed25519::derivePublicKey(peerSeed + peerSeed);
+        printf("PEERPUB %s\n", peerPub.c_str());
+
+        std::string secret = PeerCrypto::keyExchange(peerSeed + peerSeed, nodePub);
+        auto nodePubBytes = hexToBytes(nodePub);
+        auto peerPubBytes = hexToBytes(peerPub);
+        auto dm = PeerCrypto::buildTextMessagePayload(
+            secret, nodePubBytes[0], peerPubBytes[0], 1787090100u, 0,
+            "sukromny pozdrav");
+        auto dmPkt = MeshCorePacketEncoder::buildPacket(
+            RouteType::Flood, PayloadType::TextMessage, dm);
+        printf("DM %s\n", bytesToHex(dmPkt.bytes).c_str());
+
+        // Optional: a PATH return from the peer carrying an ACK (argv[2] =
+        // 8-hex ack value read from RESP_SENT at runtime)
+        if (argc > 2) {
+            auto ackBytes = hexToBytes(argv[2]);
+            std::vector<uint8_t> plain;
+            plain.push_back(2);            // two 1-byte hops
+            plain.push_back(0xAA);
+            plain.push_back(0xBB);
+            plain.push_back(3);            // extra type: ACK
+            plain.insert(plain.end(), ackBytes.begin(), ackBytes.end());
+            plain.push_back(0);            // attempt echo
+            plain.push_back(0x42);         // uniqueness byte
+            auto mac = PeerCrypto::encryptThenMac(secret, plain);
+            std::vector<uint8_t> payload;
+            payload.push_back(nodePubBytes[0]);
+            payload.push_back(peerPubBytes[0]);
+            payload.insert(payload.end(), mac.begin(), mac.end());
+            auto pathPkt = MeshCorePacketEncoder::buildPacket(
+                RouteType::Flood, PayloadType::Path, payload);
+            printf("PATHPKT %s\n", bytesToHex(pathPkt.bytes).c_str());
+        }
+    }
     return 0;
 }

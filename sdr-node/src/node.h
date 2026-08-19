@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <map>
@@ -18,6 +19,9 @@
 
 #include "node_config.h"
 #include "radio_sdr.h"
+
+// Local alias so the header need not pull in the decoder's enums
+enum class PayloadTypeTag : uint8_t { Req = 0x00, Response = 0x01, AnonReq = 0x07 };
 
 // Companion protocol constants (meshcore_protocol.dart)
 enum Cmd : uint8_t {
@@ -30,16 +34,23 @@ enum Cmd : uint8_t {
     CMD_SET_ADVERT_NAME = 8,
     CMD_SYNC_NEXT_MESSAGE = 10,
     CMD_SET_RADIO_PARAMS = 11,
+    CMD_RESET_PATH = 13,
     CMD_SET_RADIO_TX_POWER = 12,
     CMD_SET_ADVERT_LATLON = 14,
     CMD_REMOVE_CONTACT = 15,
     CMD_GET_BATT_AND_STORAGE = 20,
+    CMD_SEND_LOGIN = 26,
+    CMD_SEND_STATUS_REQ = 27,
+    CMD_SEND_TRACE_PATH = 36,
     CMD_DEVICE_QUERY = 22,
     CMD_GET_CHANNEL = 31,
     CMD_SET_CHANNEL = 32,
     CMD_SET_OTHER_PARAMS = 38,
     CMD_GET_CUSTOM_VAR = 40,
     CMD_SET_FLOOD_SCOPE = 54,
+    CMD_SEND_CONTROL_DATA = 55,
+    CMD_SEND_ANON_REQ = 57,
+    CMD_SEND_CHANNEL_DATA = 62,
     CMD_GET_STATS = 56,
     CMD_SET_AUTO_ADD_CONFIG = 58,
     CMD_GET_AUTO_ADD_CONFIG = 59,
@@ -54,6 +65,7 @@ enum Resp : uint8_t {
     RESP_SELF_INFO = 5,
     RESP_SENT = 6,
     RESP_CONTACT_MSG_RECV = 7,
+    RESP_CONTACT_MSG_RECV_V3 = 16,
     RESP_CHANNEL_MSG_RECV = 8,
     RESP_NO_MORE_MESSAGES = 10,
     RESP_BATT_AND_STORAGE = 12,
@@ -61,12 +73,15 @@ enum Resp : uint8_t {
     RESP_CHANNEL_INFO = 18,
     RESP_CUSTOM_VARS = 21,
     RESP_AUTO_ADD_CONFIG = 25,
+    RESP_CHANNEL_DATA_RECV = 27,
 };
 
 enum Push : uint8_t {
     PUSH_ADVERT = 0x80,
     PUSH_MSG_WAITING = 0x83,
     PUSH_NEW_ADVERT = 0x8A,
+    PUSH_BINARY_RESPONSE = 0x8C,
+    PUSH_CONTROL_DATA = 0x8E,
 };
 
 struct Contact {
@@ -76,6 +91,29 @@ struct Contact {
     uint32_t lastAdvert = 0;
     uint32_t lastMod = 0;
     int32_t lat = 0, lon = 0;      // x1e6, 0 = unknown
+    std::string secretHex;         // cached ECDH shared secret (lazy)
+    // Path the last advert arrived over (raw packed len byte + path bytes)
+    uint8_t advPathLen = 0xFF;
+    std::vector<uint8_t> advPath;
+    uint32_t advRecvTime = 0;
+    // Outbound route to this contact, learned from their PATH returns
+    // (packed len byte, 0xFF = unknown -> flood)
+    uint8_t outPathLen = 0xFF;
+    std::vector<uint8_t> outPath;
+};
+
+// A sent direct message whose delivery ACK we are waiting for
+struct PendingAck {
+    uint32_t ack = 0;
+    double sentAt = 0.0;
+};
+
+// An outstanding repeater request awaiting its RESPONSE payload
+struct PendingReq {
+    enum Kind { Login, Status, Cli, Anon } kind = Login;
+    std::vector<uint8_t> pubKey;   // 32
+    uint32_t tag = 0;
+    double sentAt = 0.0;
 };
 
 // A frame waiting for the app's CMD_SYNC_NEXT_MESSAGE pull
@@ -85,6 +123,10 @@ struct QueuedMessage {
 
 class Node {
 public:
+    // Mirrors firmware MAX_GROUP_CHANNELS: DEVICE_INFO advertises it and
+    // GET/SET_CHANNEL error past it (the official app scans until that error)
+    static constexpr uint8_t MAX_CHANNELS = 8;
+
     // sendToApp delivers one protocol frame to the connected app (no-op when
     // disconnected); it must be safe to call from the radio thread.
     using AppSender = std::function<void(const std::vector<uint8_t>&)>;
@@ -102,9 +144,31 @@ public:
     void setAppSender(AppSender sender);
 
     void sendSelfAdvert(bool flood);
+    // Rough LoRa airtime for a packet of n bytes at the current TX params
+    double estimateAirtime(size_t bytes) const;
+    ~Node();
 
 private:
+    // Transmissions run on their own thread: the app expects RESP_SENT
+    // immediately (firmware queues and replies), and blocking the server
+    // thread for the HackRF's open+airtime made the send button hang.
+    void enqueueTx(std::string hex);
+    void txWorker();
     std::vector<uint8_t> buildSelfInfo();
+    void handleSendDirectText(const std::vector<uint8_t>& f, const AppSender& send);
+    void handleAddUpdateContact(const std::vector<uint8_t>& f, const AppSender& send);
+    void handleRepeaterRequest(const std::vector<uint8_t>& f, const AppSender& send,
+                               PendingReq::Kind kind);
+    void handleAnonRequest(const std::vector<uint8_t>& f, const AppSender& send);
+    // Route a datagram to a contact: direct over a learned path, else flood
+    bool sendToContact(const Contact& c, PayloadTypeTag type,
+                       const std::vector<uint8_t>& payload);
+    void onContactResponse(const Contact& c, const std::vector<uint8_t>& data,
+                           double now);
+    // Shared secret for a contact, computed once and cached
+    const std::string& contactSecret(Contact& c);
+    void persistContacts();
+    void loadContactsFile();
     std::vector<uint8_t> buildDeviceInfo();
     std::vector<uint8_t> buildContactFrame(const Contact& c, uint8_t code);
     void handleSendChannelText(const std::vector<uint8_t>& f, const AppSender& send);
@@ -120,6 +184,16 @@ private:
     std::map<std::string, Contact> contacts_;       // key: pubkey hex
     std::deque<QueuedMessage> inbox_;
     std::map<std::string, double> seen_;            // payload hash -> time
+    std::deque<PendingAck> pendingAcks_;
+    std::deque<PendingReq> pendingReqs_;
+    std::map<uint32_t, double> sentTraces_;   // tag -> time, for progress logs
     AppSender appSender_;
     float lastSnr_ = 0.0f;
+    double txAirSecs_ = 0.0, rxAirSecs_ = 0.0;
+    time_t startTime_ = 0;
+
+    std::thread txThread_;
+    std::condition_variable txCv_;
+    std::deque<std::string> txQueue_;
+    bool txStop_ = false;
 };

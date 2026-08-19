@@ -12,6 +12,7 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <vector>
 #include <sys/types.h>
 
 struct RxPacket {
@@ -41,6 +42,8 @@ struct RadioConfig {
     int tx_cr = 1;
     int tx_ppm = 0;
     int tx_vga = 30;
+    bool tx_amp = false;                // HackRF PA (+11 dB); fine for TX,
+                                        // it is the RX side the amp overloads
     double tx_duty = 10.0;              // EU 869.4-869.65 sub-band allows 10%
 };
 
@@ -54,6 +57,10 @@ public:
     // Spawn lora_rx and start the reader thread; handler runs on that thread.
     bool start(PacketHandler handler);
     void stop();
+
+    // Kill the current lora_rx; the supervisor respawns it with the current
+    // config (used after live radio-param changes)
+    void restartRx();
 
     // Blocking transmit of one raw packet (hex). Runs lora_tx to completion;
     // returns false if the child failed. Estimated airtime is reported so the
@@ -69,7 +76,9 @@ public:
     RadioConfig& config() { return cfg_; }
 
 private:
-    void readerLoop(int fd);
+    void superviseLoop();
+    void readPipe(int fd);
+    std::vector<std::string> rxArgv() const;
 
     RadioConfig cfg_;
     PacketHandler handler_;

@@ -34,9 +34,11 @@ NodeConfig NodeConfig::load(const std::string& path, std::string& err) {
         if (k == "name") c.name = v;
         else if (k == "identity_file") c.identity_file = v;
         else if (k == "channels_file") c.channels_file = v;
+        else if (k == "contacts_file") c.contacts_file = v;
         else if (k == "lat") c.lat = atof(v.c_str());
         else if (k == "lon") c.lon = atof(v.c_str());
         else if (k == "port") c.port = atoi(v.c_str());
+        else if (k == "advert_interval_min") c.advert_interval_min = atoi(v.c_str());
         else if (k == "rx_binary") c.rx_binary = v;
         else if (k == "tx_binary") c.tx_binary = v;
         else if (k == "rx_device") c.rx_device = v;
@@ -49,6 +51,7 @@ NodeConfig NodeConfig::load(const std::string& path, std::string& err) {
         else if (k == "tx_cr") c.tx_cr = atoi(v.c_str());
         else if (k == "tx_ppm") c.tx_ppm = atoi(v.c_str());
         else if (k == "tx_vga") c.tx_vga = atoi(v.c_str());
+        else if (k == "tx_amp") c.tx_amp = atoi(v.c_str()) != 0;
         else if (k == "tx_duty") c.tx_duty = atof(v.c_str());
         else fprintf(stderr, "[config] unknown key '%s'\n", k.c_str());
     }

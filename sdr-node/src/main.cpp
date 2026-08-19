@@ -54,6 +54,7 @@ int main(int argc, char* argv[]) {
     rc.tx_cr = cfg.tx_cr;
     rc.tx_ppm = cfg.tx_ppm;
     rc.tx_vga = cfg.tx_vga;
+    rc.tx_amp = cfg.tx_amp;
     rc.tx_duty = cfg.tx_duty;
 
     SdrRadio radio(rc);
@@ -68,10 +69,17 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
 
-    if (advertise) {
-        std::thread([&node] {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            node.sendSelfAdvert(true);
+    if (advertise || cfg.advert_interval_min > 0) {
+        std::thread([&node, &cfg, advertise] {
+            if (advertise) {
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                node.sendSelfAdvert(true);
+            }
+            while (cfg.advert_interval_min > 0) {
+                std::this_thread::sleep_for(
+                    std::chrono::minutes(cfg.advert_interval_min));
+                node.sendSelfAdvert(true);
+            }
         }).detach();
     }
 

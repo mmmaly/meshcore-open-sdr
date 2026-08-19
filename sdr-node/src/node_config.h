@@ -21,10 +21,12 @@ struct NodeConfig {
     std::string name = "SDR Node";
     std::string identity_file = "identity.key";
     std::string channels_file = "channels.txt";
+    std::string contacts_file = "contacts.txt";
     std::optional<double> lat, lon;
 
     // TCP server
     int port = 5000;
+    int advert_interval_min = 240;   // periodic flood advert; 0 = off
 
     // Radio (mirrors RadioConfig; parsed into it by main)
     std::string rx_binary = "lora_rx";
@@ -39,6 +41,7 @@ struct NodeConfig {
     int tx_cr = 1;
     int tx_ppm = 0;
     int tx_vga = 30;
+    bool tx_amp = false;
     double tx_duty = 10.0;
 
     static NodeConfig load(const std::string& path, std::string& err);
