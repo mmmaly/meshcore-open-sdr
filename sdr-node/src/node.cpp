@@ -88,12 +88,14 @@ void Node::persistContacts() {
     FILE* f = fopen(cfg_.contacts_file.c_str(), "w");
     if (!f) return;
     chmod(cfg_.contacts_file.c_str(), 0600);
-    fprintf(f, "# pubkey\ttype\tlast_advert\tlast_mod\tlat\tlon\toutpathlen\toutpath\tname\n");
+    fprintf(f, "# pubkey\ttype\tlast_advert\tlast_mod\tlat\tlon\toutpathlen\toutpath"
+               "\tadvpathlen\tadvpath\tadvrecv\tname\n");
     for (const auto& [k, c] : contacts_)
-        fprintf(f, "%s\t%u\t%u\t%u\t%d\t%d\t%u\t%s\t%s\n", k.c_str(), c.type,
-                c.lastAdvert, c.lastMod, c.lat, c.lon, c.outPathLen,
-                c.outPath.empty() ? "-" : bytesToHex(c.outPath).c_str(),
-                c.name.c_str());
+        fprintf(f, "%s\t%u\t%u\t%u\t%d\t%d\t%u\t%s\t%u\t%s\t%u\t%s\n",
+                k.c_str(), c.type, c.lastAdvert, c.lastMod, c.lat, c.lon,
+                c.outPathLen, c.outPath.empty() ? "-" : bytesToHex(c.outPath).c_str(),
+                c.advPathLen, c.advPath.empty() ? "-" : bytesToHex(c.advPath).c_str(),
+                c.advRecvTime, c.name.c_str());
     fclose(f);
 }
 
@@ -103,10 +105,16 @@ void Node::loadContactsFile() {
     char line[512];
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == '#') continue;
-        char key[130] = {0}, name[64] = {0}, pathhex[140] = {0};
-        unsigned type = 1, adv = 0, mod = 0, opl = 0xFF;
+        char key[130] = {0}, name[64] = {0}, pathhex[140] = {0}, advhex[140] = {0};
+        unsigned type = 1, adv = 0, mod = 0, opl = 0xFF, apl = 0xFF, arecv = 0;
         int lat = 0, lon = 0;
-        int n = sscanf(line, "%129[^\t]\t%u\t%u\t%u\t%d\t%d\t%u\t%139[^\t]\t%63[^\n]",
+        int n = sscanf(line,
+                       "%129[^\t]\t%u\t%u\t%u\t%d\t%d\t%u\t%139[^\t]"
+                       "\t%u\t%139[^\t]\t%u\t%63[^\n]",
+                       key, &type, &adv, &mod, &lat, &lon, &opl, pathhex,
+                       &apl, advhex, &arecv, name);
+        if (n < 12)    // format without advert-path columns
+            n = sscanf(line, "%129[^\t]\t%u\t%u\t%u\t%d\t%d\t%u\t%139[^\t]\t%63[^\n]",
                        key, &type, &adv, &mod, &lat, &lon, &opl, pathhex, name);
         if (n < 9) {   // old format without path columns
             opl = 0xFF; pathhex[0] = 0;
@@ -124,6 +132,10 @@ void Node::loadContactsFile() {
             c.outPathLen = (uint8_t)opl;
             if (pathhex[0] && strcmp(pathhex, "-") != 0)
                 c.outPath = hexToBytes(pathhex);
+            c.advPathLen = (uint8_t)apl;
+            c.advRecvTime = arecv;
+            if (advhex[0] && strcmp(advhex, "-") != 0)
+                c.advPath = hexToBytes(advhex);
             contacts_[toLower(key)] = c;
         }
     }
@@ -969,7 +981,11 @@ void Node::onRxPacket(const RxPacket& pkt) {
         {
             std::lock_guard<std::mutex> lk(mtx_);
             auto prev = contacts_.find(toLower(a->publicKey));
-            if (prev != contacts_.end()) c.secretHex = prev->second.secretHex;
+            if (prev != contacts_.end()) {
+                c.secretHex = prev->second.secretHex;
+                c.outPathLen = prev->second.outPathLen;
+                c.outPath = prev->second.outPath;
+            }
             contacts_[toLower(a->publicKey)] = c;
             persistContacts();
             sender = appSender_;
