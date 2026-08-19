@@ -312,10 +312,18 @@ void Node::handleCommand(const std::vector<uint8_t>& f, const AppSender& send) {
         std::vector<uint8_t> start{RESP_CONTACTS_START};
         putU32(start, (uint32_t)contacts_.size());
         send(start);
+        uint32_t mostRecent = 0;
         for (const auto& [k, c] : contacts_)
-            if (c.lastMod > since)
+            if (c.lastMod > since) {
                 send(buildContactFrame(c, RESP_CONTACT));
-        send({RESP_END_OF_CONTACTS});
+                if (c.lastMod > mostRecent) mostRecent = c.lastMod;
+            }
+        // Firmware's END frame is 5 bytes: [4][most_recent_lastmod4], the
+        // app's next 'since'. A bare [4] fails the official app's parse and
+        // the whole sync is discarded.
+        std::vector<uint8_t> end{RESP_END_OF_CONTACTS};
+        putU32(end, mostRecent);
+        send(end);
         break;
     }
     case CMD_REMOVE_CONTACT:
