@@ -82,13 +82,41 @@ reaches it through a LaunchAgent-managed ssh tunnel
 (`~/Library/LaunchAgents/net.mmm.sdr-tunnel.plist`, local port 5001 -
 macOS AirPlay squats on 5000).
 
+## Testing
+
+`ctest` runs the whole protocol surface against fake radios - no SDR, no
+mesh, a couple of seconds:
+
+```bash
+cd build && ctest --output-on-failure
+```
+
+The test drives the real daemon over a real socket, speaking the app's
+exact framing, and walks the connect handshake field by field, channel
+sync, the offline queue, contacts, channel and direct messages, delivery
+ACKs, routing (a PATH return must teach a route and the next message must
+radiate over it), traces, discovery, channel data and anonymous requests -
+asserting on the bytes actually handed to the transmitter. 87 assertions.
+
+Packets injected into the fake receiver are built by the real encoder, and
+"transmitted" packets are decoded back with the real decoder, so a change
+that breaks the wire format fails the test rather than the mesh.
+
 ## Notes and limits
 
 - One app client at a time; a new connection replaces the old one.
-- `SET_RADIO_PARAMS` from the app retunes the **transmit** side immediately;
-  the receiver keeps its configured channel fan-out until the daemon is
-  restarted (the RX side can watch several channels/SFs at once, which a
-  real SX1262 node cannot).
+- `SET_RADIO_PARAMS` retunes the transmitter immediately and appends the
+  new frequency to the receiver's channel list, bouncing `lora_rx` to pick
+  it up. The RX side can watch several channels and spreading factors at
+  once, which a real SX1262 node cannot.
+- Anonymous requests (the "request name" flow) are sent direct, never
+  flood: repeaters guard every non-login `ANON_REQ_TYPE_*` branch with
+  `isRouteDirect()` and silently drop flood-routed ones.
+- Delivery receipts and trace results are single unacknowledged packets. At
+  these power levels a lost one looks exactly like a timeout even though
+  the message itself arrived.
+- At ~25 mW EIRP the node is heard by nearby repeaters but is not a
+  long-range station; `tx_vga`/`tx_amp` are already at the HackRF maximum.
 - The RTL-SDR hears the HackRF's own transmissions; the daemon dedups them
   (as it dedups mesh flood rebroadcasts) by payload within a 10-minute window.
 - Duty cycle: `lora_tx` enforces `tx_duty` (default 10%, the EU 869.4-869.65

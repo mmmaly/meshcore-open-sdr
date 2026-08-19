@@ -1,6 +1,23 @@
-# MeshCore Open
+# MeshCore Open (SDR fork)
 
 Open-source Flutter client for MeshCore LoRa mesh networking devices.
+
+> **This fork adds [`sdr-node/`](sdr-node/): a MeshCore node whose radio is
+> a pair of SDRs** - an RTL-SDR receives, a HackRF transmits - instead of a
+> LoRa chip. It speaks the companion-radio protocol over TCP, so the app
+> below (or the official MeshCore app) connects to it through the ordinary
+> "Connect via TCP" screen and chats on a real mesh with no dedicated
+> hardware. The Flutter app itself is unmodified from upstream.
+>
+> ```
+> app ──TCP:5000──> meshcore-sdr-node ──┬── lora_rx (RTL-SDR)  receive
+>                                       └── lora_tx (HackRF)   transmit
+> ```
+>
+> It does channel chat, end-to-end encrypted direct messages with delivery
+> receipts, directed routing, adverts, contacts, trace paths, node
+> discovery, and repeater administration - all verified against a live
+> mesh. See [sdr-node/README.md](sdr-node/README.md) to build and run it.
 
 ## Overview
 
