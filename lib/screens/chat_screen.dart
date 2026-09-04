@@ -252,6 +252,8 @@ class _ChatScreenState extends State<ChatScreen> {
                       );
                     case 'clearChat':
                       _confirmClearChat(context, connector);
+                    case 'range':
+                      _rangeContact(context, connector);
                   }
                 },
                 itemBuilder: (context) => [
@@ -292,6 +294,16 @@ class _ChatScreenState extends State<ChatScreen> {
                         const Icon(Icons.settings, size: 20),
                         const SizedBox(width: 12),
                         Text(context.l10n.contact_settings),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'range',
+                    child: Row(
+                      children: const [
+                        Icon(Icons.straighten, size: 20),
+                        SizedBox(width: 12),
+                        Text('Range (LR2021 time of flight)'),
                       ],
                     ),
                   ),
@@ -725,6 +737,84 @@ class _ChatScreenState extends State<ChatScreen> {
       translatedLanguageCode: translatedLanguageCode,
       translationModelId: translationModelId,
     );
+  }
+
+  /// LR2021 time-of-flight ranging (private companion frames, see
+  /// RangingControl.h in the node): [F0][peer pubkey 32][count] -> the node
+  /// asks the contact to answer as ranging subordinate, runs the exchanges and
+  /// pushes [F0][status][valid][count][median_cm][min_cm][max_cm].
+  Future<void> _rangeContact(
+    BuildContext context,
+    MeshCoreConnector connector,
+  ) async {
+    const int rangingCode = 0xF0;
+    const int count = 10;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Ranging... (about 3 s)')),
+    );
+    final completer = Completer<Uint8List>();
+    final sub = connector.receivedFrames.listen((frame) {
+      if (frame.isNotEmpty &&
+          frame[0] == rangingCode &&
+          !completer.isCompleted) {
+        completer.complete(frame);
+      }
+    });
+    try {
+      final req = Uint8List(34);
+      req[0] = rangingCode;
+      req.setRange(1, 33, widget.contact.publicKey);
+      req[33] = count;
+      await connector.sendFrame(req);
+      final frame = await completer.future.timeout(
+        const Duration(seconds: 30),
+      );
+      final data = ByteData.sublistView(frame);
+      final status = frame[1];
+      final valid = frame[2];
+      final total = frame[3];
+      final median = data.getInt32(4, Endian.little) / 100.0;
+      final min = data.getInt32(8, Endian.little) / 100.0;
+      final max = data.getInt32(12, Endian.little) / 100.0;
+      final String text = switch (status) {
+        0 =>
+          '${widget.contact.name}: ${median.toStringAsFixed(1)} m '
+              '($valid/$total exchanges, ${min.toStringAsFixed(1)} to '
+              '${max.toStringAsFixed(1)} m)',
+        1 =>
+          'No ranging response from ${widget.contact.name} '
+              '(not a direct LR2021 neighbour, or not on the same channel)',
+        2 => "This node's radio cannot range",
+        _ => 'Ranging failed (status $status)',
+      };
+      messenger.hideCurrentSnackBar();
+      if (context.mounted) {
+        await showDialog<void>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Distance'),
+            content: Text(text),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+      }
+    } on TimeoutException {
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Ranging: no answer from the node')),
+      );
+    } catch (e) {
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(content: Text('Ranging failed: $e')));
+    } finally {
+      await sub.cancel();
+    }
   }
 
   Future<void> _confirmClearChat(
